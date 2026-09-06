@@ -1,0 +1,33 @@
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data
+data/
+datasets/
+outputs/
+logs/
+
+# Model cache
+.cache/
+huggingface_cache/
+
+# Evaluation temporary files
+evaluation/tmp/
