@@ -1,10 +1,13 @@
 from mcp.server import MCPServer
-from tools.knowledge import register_knowledge_tools
 
-#创建mcp服务器
-mcp=MCPServer("JinC7-agent_server")
-#注册knowledge Tool
-register_knowledge_tools(mcp)
+from tools import register_all_tools
+
+# 创建 MCP Server
+mcp = MCPServer("JinC7-agent_server")
+
+# 注册所有 MCP Tools
+register_all_tools(mcp)
+
 
 if __name__ == "__main__":
     mcp.run()

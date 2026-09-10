@@ -15,9 +15,9 @@ def json_schema_to_pydantic(
     properties=schema.get("properties",{})
     required=schema.get("required",[])
 
-    fields={}
+    fields: dict[str, tuple[Any, Any]] = {}
 
-    for field_name,field_schema in properties:
+    for field_name,field_schema in properties.items():
         field_type=json_type_to_python(
             field_schema.get("type")
         )
@@ -34,7 +34,7 @@ def json_schema_to_pydantic(
             )
         )
 
-        return create_model(
+    return create_model(
             name,
             **fields
         )

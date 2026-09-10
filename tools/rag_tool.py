@@ -25,6 +25,7 @@ def rag_search(query: str, k: int) -> str:
     )
 
     response.raise_for_status()
+
     data=response.json()
 
     documents=data["documents"]

@@ -5,7 +5,7 @@ from mcp.client.stdio import stdio_client,StdioServerParameters
 
 server_params=StdioServerParameters(
     command="python",
-    args=["mcp_server/server"]
+    args=["mcp_server/server.py"]
 )
 
 @asynccontextmanager

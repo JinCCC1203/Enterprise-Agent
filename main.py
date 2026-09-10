@@ -4,7 +4,7 @@ import asyncio
 
 async def main():
     config=get_config("user_001")
-    async with create_agent_app as agent:
+    async with create_agent_app() as agent:
         response = await agent.ainvoke(
             {
                 "messages": [

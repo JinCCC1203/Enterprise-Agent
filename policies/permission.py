@@ -22,8 +22,6 @@ class PermissionResult:
 
 class PermissionPolicy:
     """
-    Tool Permission Policy
-
     职责：
     1. 从运行时 ToolRegistry 获取 ToolMetadata
     2. 根据 user_role 判断是否允许使用 Tool
