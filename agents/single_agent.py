@@ -31,7 +31,7 @@ from memories.long_memory.manager import MemoryManager
 from memories.long_memory.store import MemoryStore
 
 from tools_manager.registration import create_tool_registry
-from tools_manager.selectors import RuleBasedToolSelector
+from tools_manager.tool_exposure import RuleBasedToolSelector
 
 
 load_dotenv()

@@ -140,11 +140,14 @@ class RiskPolicy:
     ) -> bool:
 
         sensitive_keywords = (
+            "create",
             "delete",
             "remove",
             "destroy",
             "update",
             "send",
+            "execute",
+            "write",
         )
 
         if any(
@@ -180,8 +183,9 @@ class RiskPolicy:
 
         if user_role == "employee":
             sensitive_tools = {
-                "send_email",
-                "delete_repository",
+                "create_ticket",
+                "update_ticket",
+                "send_notification",
             }
 
             return tool_name in sensitive_tools

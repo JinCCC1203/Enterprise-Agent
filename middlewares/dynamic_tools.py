@@ -8,40 +8,25 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 
-from tools_manager.selectors import (
-    RuleBasedToolSelector,
-    SelectionContext,
-)
+from tools_manager.tool_exposure import PermissionBasedToolExposure
 
 
 class DynamicToolMiddleware(AgentMiddleware):
     """
-    在每次 Model Call 前，
-    动态决定哪些 Tool 暴露给模型。
+    在每次 Model Call 前，根据当前运行时用户角色，动态决定哪些 Tool 可以暴露给模型。
 
-    流程：
-
-        Runtime Context
-              ↓
-        SelectionContext
-              ↓
-        RuleBasedToolSelector
-              ↓
-        candidate tools
-              ↓
-        request.override(tools=...)
-              ↓
-        LLM
+    注意：
+        DynamicToolMiddleware 不负责决定LLM 最终调用哪个 Tool。
+        它只负责在 Model Call 前控制Tool Exposure。
     """
 
     def __init__(
         self,
-        selector: RuleBasedToolSelector,
+        tool_exposure: PermissionBasedToolExposure,
     ) -> None:
-
         super().__init__()
 
-        self.selector = selector
+        self.tool_exposure = tool_exposure
 
     def wrap_model_call(
         self,
@@ -55,21 +40,17 @@ class DynamicToolMiddleware(AgentMiddleware):
         # 获取 Runtime Context
         context = request.runtime.context
 
-        # 构造 Selector Context
-        selection_context = SelectionContext(
-            role=context.user_role,
-            task_type=context.task_type,
-            query=self._extract_query(request),
+        # 获取当前用户角色
+        user_role = context.user_role
+
+        # 根据权限决定哪些 Tool 可以暴露给 LLM
+        exposed_tools = self.tool_exposure.expose(
+            role=user_role,
         )
 
-        # Selector 筛选候选 Tool
-        selected_tools = self.selector.select(
-            selection_context
-        )
-
-        # 只把候选 Tool 暴露给当前 Model Call
+        # 只向当前 Model Call 暴露允许使用的 Tool
         new_request = request.override(
-            tools=selected_tools
+            tools=exposed_tools,
         )
 
         return handler(new_request)
@@ -79,7 +60,8 @@ class DynamicToolMiddleware(AgentMiddleware):
         request: ModelRequest,
     ) -> str:
         """
-        获取当前请求中的最后一条用户消息。
+        获取当前请求中的最后一条用户消息。在目前的动态工具选择中间件中用不上。
+        后续可以根据PermissionBasedToolExposure的扩展，来进一步决定是否使用用户消息。
         """
         for message in reversed(request.messages):
 
