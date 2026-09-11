@@ -8,23 +8,30 @@ from workflow.graphs.single_agent import build_single_agent_graph
 from workflow.state import EnterpriseAgentContext
 
 
-async def main():
-    # --------------------------------------------------------------
+async def main() -> None:
+    # ==============================================================
     # LangGraph execution config
     #
-    # 主要用于：
-    # - thread_id
-    # - checkpoint
-    # - execution configuration
-    # --------------------------------------------------------------
+    # 用于：
+    #   - thread_id
+    #   - checkpoint
+    #   - 其他执行配置
+    # ==============================================================
 
-    config = get_config(
-        "user_001"
-    )
+    config = get_config("user_001")
 
-    # --------------------------------------------------------------
-    # 当前请求的 Runtime Context
-    # --------------------------------------------------------------
+    # ==============================================================
+    # Runtime Context
+    #
+    # 用于：
+    #   - user_id
+    #   - user_role
+    #   - tenant_id
+    #
+    # 注意：
+    #   这些信息属于可信运行时上下文，
+    #   不属于 Graph State。
+    # ==============================================================
 
     context = EnterpriseAgentContext(
         user_id="user_001",
@@ -32,32 +39,52 @@ async def main():
         tenant_id=None,
     )
 
-    # --------------------------------------------------------------
-    # 创建现有 LangChain Agent Runtime
-    # --------------------------------------------------------------
+    # ==============================================================
+    # 创建 LangChain Agent Runtime
+    # ==============================================================
 
     async with create_agent_app() as agent:
 
-        # ----------------------------------------------------------
+        # ==========================================================
         # 构建 LangGraph
-        # ----------------------------------------------------------
+        #
+        # 当前阶段：
+        #
+        #   START
+        #     ↓
+        #   Agent
+        #     ↓
+        #    END
+        #
+        # 后续：
+        #
+        #   START
+        #     ↓
+        #   Memory Retrieve
+        #     ↓
+        #   Supervisor
+        #     ↓
+        #   Specialist
+        #     ↓
+        #   Memory Persist
+        #     ↓
+        #    END
+        # ==========================================================
 
         graph = build_single_agent_graph(
             agent=agent,
         )
 
-        # ----------------------------------------------------------
+        # ==========================================================
         # 执行 LangGraph
-        # ----------------------------------------------------------
+        # ==========================================================
 
         response = await graph.ainvoke(
             {
                 "messages": [
                     {
                         "role": "user",
-                        "content": (
-                            "请检查一下 payment-service 的状态"
-                        ),
+                        "content": "请检查一下 payment-service 的状态",
                     }
                 ],
                 "retrieved_memories": [],
@@ -72,13 +99,25 @@ async def main():
             context=context,
         )
 
-        # ----------------------------------------------------------
-        # 输出最终消息
-        # ----------------------------------------------------------
+        # ==========================================================
+        # 输出最终结果
+        # ==========================================================
 
-        print(
-            response["messages"][-1].content
+        messages = response.get("messages", [])
+
+        if not messages:
+            print("Agent 未返回消息。")
+            return
+
+        final_message = messages[-1]
+
+        content = getattr(
+            final_message,
+            "content",
+            "",
         )
+
+        print(content)
 
 
 if __name__ == "__main__":

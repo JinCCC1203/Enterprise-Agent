@@ -15,8 +15,8 @@ from langchain_openai import ChatOpenAI
 from memories.short_memory import checkpointer
 
 from middlewares.LoggingMiddleware import LoggingMiddleware
-from middlewares.RetryMiddleware import retry_model, retry_tool
-from middlewares.ToolErrorMiddleware import tool_error
+from middlewares.RetryMiddleware import retry_model_async, retry_tool_async
+from middlewares.ToolErrorMiddleware import tool_error_async
 from middlewares.dynamic_tools import DynamicToolMiddleware
 from middlewares.MemoryMiddleware import (
     MemoryRetrievalMiddleware,
@@ -181,7 +181,7 @@ async def create_agent_app():
         #     Memory Persistence
         #
         # 不需要重写 MemoryManager / Store / Embedder。
-
+        '''
         memory_store = MemoryStore(
             database_url=os.getenv(
                 "MEMORY_DATABASE_URL"
@@ -218,6 +218,7 @@ async def create_agent_app():
         memory_persistence = MemoryPersistenceMiddleware(
             memory_manager=memory_manager,
         )
+        '''
 
         pii_middlewares = create_pii_middlewares()
 
@@ -249,7 +250,7 @@ async def create_agent_app():
                 # LangGraph 阶段：
                 # 后续迁移为 Workflow-level Memory Retrieval Node。
 
-                memory_retrieval,
+                # memory_retrieval,
 
                 # Dynamic Tool Exposure
                 #
@@ -294,22 +295,24 @@ async def create_agent_app():
                 # Workflow-level Memory Persistence Node。
                 # ==========================================================
 
-                memory_persistence,
+                # memory_persistence,
 
                 # ==========================================================
                 # Reliability
                 # ==========================================================
 
-                retry_model,
-                retry_tool,
-                tool_error,
+                retry_model_async,
+                retry_tool_async,
+                tool_error_async,
             ],
         )
+
+        yield agent
 
         # ==================================================================
         # 11. Yield Agent
         # ==================================================================
-
+        '''
         try:
             yield agent
 
@@ -319,3 +322,4 @@ async def create_agent_app():
             # ==============================================================
 
             await memory_manager.close()
+        '''
