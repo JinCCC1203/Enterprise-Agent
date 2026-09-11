@@ -10,7 +10,6 @@ from .models import Memory, MemoryType
 from .store import MemoryStore
 
 
-
 @dataclass(frozen=True, slots=True)
 class MemorySearchResult:
     """
@@ -30,6 +29,7 @@ class MemoryOperation(str, Enum):
     """
     Memory 持久化操作类型。
     """
+
     ADD = "add"
     UPDATE = "update"
     IGNORE = "ignore"
@@ -46,9 +46,11 @@ class MemoryOperationResult:
     reason:
         操作原因。
     """
+
     operation: MemoryOperation
     memory: Memory | None
     reason: str
+
 
 # Memory Manager
 class MemoryManager:
@@ -83,6 +85,13 @@ class MemoryManager:
         MemoryStore.similarity_search()
           ↓
         Similar Memories
+
+    数据隔离：
+        user_id
+            ↓
+        MemoryStore
+            ↓
+        PostgreSQL Memory
     """
 
     def __init__(
@@ -252,6 +261,7 @@ class MemoryManager:
         # 使用新的 Candidate 覆盖原 Memory
         updated_memory = await self.store.update(
             memory_id=similar_memory.id,
+            user_id=user_id,
             content=candidate.content,
             embedding=embedding,
             metadata=self._build_metadata(
@@ -282,6 +292,7 @@ class MemoryManager:
         """
         对长期记忆进行语义检索。
         """
+
         query_embedding = self.embedder.embed_query(
             query
         )
@@ -318,14 +329,20 @@ class MemoryManager:
     # Get
     async def get(
         self,
+        *,
         memory_id: int,
+        user_id: str,
     ) -> Memory | None:
         """
-        根据 Memory ID 获取记忆。
+        根据 Memory ID 获取指定用户的记忆。
+
+        user_id 作为数据隔离条件，
+        防止仅凭 memory_id 访问其他用户的 Memory。
         """
 
         return await self.store.get(
-            memory_id
+            memory_id=memory_id,
+            user_id=user_id,
         )
 
     # List
@@ -349,14 +366,20 @@ class MemoryManager:
     # Delete
     async def delete(
         self,
+        *,
         memory_id: int,
+        user_id: str,
     ) -> bool:
         """
-        删除指定 Memory。
+        删除指定用户的指定 Memory。
+
+        user_id 作为数据隔离条件，
+        防止仅凭 memory_id 删除其他用户的 Memory。
         """
 
         return await self.store.delete(
-            memory_id
+            memory_id=memory_id,
+            user_id=user_id,
         )
 
     async def delete_user_memories(

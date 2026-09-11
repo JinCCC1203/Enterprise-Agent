@@ -109,19 +109,19 @@ class MemoryStore:
 
     # Get By ID
     async def get(
-        self,
-        memory_id: int,
+            self,
+            *,
+            memory_id: int,
+            user_id: str,
     ) -> Memory | None:
-
-        async with self.session_factory() as session:
-
-            result = await session.execute(
-                select(Memory).where(
-                    Memory.id == memory_id
-                )
+        result = await self.session.execute(
+            select(Memory).where(
+                Memory.id == memory_id,
+                Memory.user_id == user_id,
             )
+        )
 
-            return result.scalar_one_or_none()
+        return result.scalar_one_or_none()
 
     # List User Memories
     async def list_by_user(
@@ -216,21 +216,27 @@ class MemoryStore:
 
     # Delete
     async def delete(
-        self,
-        memory_id: int,
+            self,
+            *,
+            memory_id: int,
+            user_id: str,
     ) -> bool:
-
-        async with self.session_factory() as session:
-
-            result = await session.execute(
-                delete(Memory).where(
-                    Memory.id == memory_id
-                )
+        result = await self.session.execute(
+            select(Memory).where(
+                Memory.id == memory_id,
+                Memory.user_id == user_id,
             )
+        )
 
-            await session.commit()
+        memory = result.scalar_one_or_none()
 
-            return result.rowcount > 0
+        if memory is None:
+            return False
+
+        await self.session.delete(memory)
+        await self.session.commit()
+
+        return True
 
     # Delete User Memories
     async def delete_by_user(
@@ -255,53 +261,31 @@ class MemoryStore:
             self,
             *,
             memory_id: int,
+            user_id: str,
             content: str,
             embedding: list[float],
-            metadata: dict[str, Any] | None = None,
-    ) -> Memory:
-        """
-        更新已有 Memory。
-        更新：
-        - content
-        - embedding
-        - metadata
-        - updated_at
-        不更新：
-        - id
-        - user_id
-        - memory_type
-        - created_at
-        """
-
-        self._validate_embedding(embedding)
-
-        async with self.session_factory() as session:
-
-            memory = await session.get(
-                Memory,
-                memory_id,
+            metadata: dict[str, Any],
+    ) -> Memory | None:
+        result = await self.session.execute(
+            select(Memory).where(
+                Memory.id == memory_id,
+                Memory.user_id == user_id,
             )
+        )
 
-            if memory is None:
-                raise KeyError(
-                    f"Memory not found: {memory_id}"
-                )
+        memory = result.scalar_one_or_none()
 
-            memory.content = content
-            memory.embedding = embedding
+        if memory is None:
+            return None
 
-            if metadata is not None:
-                memory.metadata_ = metadata
+        memory.content = content
+        memory.embedding = embedding
+        memory.metadata_ = metadata
 
-            memory.updated_at = datetime.now(
-                timezone.utc
-            )
+        await self.session.commit()
+        await self.session.refresh(memory)
 
-            await session.commit()
-
-            await session.refresh(memory)
-
-            return memory
+        return memory
 
     # Close
     async def close(self) -> None:
