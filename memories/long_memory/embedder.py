@@ -41,7 +41,7 @@ class MemoryEmbedder:
                 "memory content cannot be empty"
             )
 
-        embedding = self.embeddings.embed_query(
+        embedding = self.embeddings.embed_documents(
             content
         )
 
