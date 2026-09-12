@@ -8,8 +8,16 @@ from langchain.agents.middleware import (
     HumanInTheLoopMiddleware,
     ToolCallRequest,
 )
+from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.postgres.aio import (
+    AsyncPostgresSaver,
+)
 
+from memories.long_memory.embedder import MemoryEmbedder
+from memories.long_memory.extractor import MemoryExtractor
+from memories.long_memory.manager import MemoryManager
+from memories.long_memory.store import MemoryStore
 from memories.short_memory import (
     get_config,
 )
@@ -41,7 +49,6 @@ from workflow.graphs.enterprise import (
 from workflow.state import (
     EnterpriseAgentContext,
 )
-from langchain_core.messages import HumanMessage
 
 
 load_dotenv()
@@ -74,6 +81,12 @@ async def main() -> None:
 
     # ==============================================================
     # 3. LangGraph execution config
+    #
+    # get_config() 必须包含：
+    #
+    #     configurable.thread_id
+    #
+    # 该 thread_id 是 Checkpoint / Resume 的核心标识。
     # ==============================================================
 
     config = get_config(
@@ -118,7 +131,7 @@ async def main() -> None:
 
         # ==========================================================
         # 7. Human-in-the-Loop
-        # ==========================================================
+        # ==============================================================
 
         human_in_the_loop = (
             HumanInTheLoopMiddleware(
@@ -139,12 +152,11 @@ async def main() -> None:
         # ==========================================================
         # 8. Shared Middleware
         #
-        # 注意：
         # DynamicToolMiddleware 不在这里。
         #
-        # 每个 Specialist Agent 会根据自身
+        # 每个 Specialist Agent 根据自己的
         # ToolRegistryView 单独创建 DynamicToolMiddleware。
-        # ==========================================================
+        # ==============================================================
 
         agent_middleware = [
             LoggingMiddleware(),
@@ -156,104 +168,187 @@ async def main() -> None:
         ]
 
         # ==========================================================
-        # 9. Enterprise Graph
-        # ==========================================================
+        # 9. Long-term Memory
+        # ==============================================================
 
-        graph = build_enterprise_graph(
+        memory_store = MemoryStore(
+            database_url=os.getenv(
+                "MEMORY_DATABASE_URL"
+            ),
+        )
+
+        memory_embedder = MemoryEmbedder(
+            model_name="BAAI/bge-base-en-v1.5",
+            expected_dim=768,
+        )
+
+        memory_extractor = MemoryExtractor(
             model=model,
-            registry=registry,
-            permission_policy=permission_policy,
-            middleware=agent_middleware,
-            memory_manager=None,
         )
 
-        # ==========================================================
-        # 10. Initial Graph State
-        # ==========================================================
-
-        initial_state = {
-             "messages": [
-    {
-        "role": "user",
-        "content": "请搜索一下最近 DeepSeek 发布的最新模型，并总结其主要更新内容。"
-    }
-],
-            "retrieved_memories": [],
-            "current_agent": None,
-            "next_agent": None,
-            "task_status": "running",
-            "handoff_reason": None,
-            "tool_results": [],
-            "approval_required": False,
-            "approval_status": None,
-            "error": None,
-            "retry_count": 0,
-            "final_answer": None,
-        }
-
-        # ==========================================================
-        # 11. Execute Enterprise Workflow
-        # ==========================================================
-
-        response = await graph.ainvoke(
-            initial_state,
-            config=config,
-            context=context,
+        memory_manager = MemoryManager(
+            extractor=memory_extractor,
+            embedder=memory_embedder,
+            store=memory_store,
+            min_confidence=0.7,
+            similarity_threshold=0.3,
+            duplicate_threshold=0.1,
         )
 
+        # 初始化长期记忆数据库表
+        await memory_manager.initialize()
+
         # ==========================================================
-        # 12. Output
-        # ==========================================================
+        # 10. LangGraph PostgreSQL Checkpointer
+        # ==============================================================
 
-        print("\n========== Workflow Result ==========")
-
-        print(
-            "Selected Agent:",
-            response.get(
-                "current_agent"
-            ),
+        langgraph_database_url = os.getenv(
+            "LANGGRAPH_DATABASE_URL"
         )
 
-        print(
-            "Task Status:",
-            response.get(
-                "task_status"
-            ),
-        )
-
-        print(
-            "Routing Reason:",
-            response.get(
-                "handoff_reason"
-            ),
-        )
-
-        messages = response.get(
-            "messages",
-            [],
-        )
-
-        if not messages:
-            print(
-                "Agent 未返回消息。"
+        if not langgraph_database_url:
+            raise ValueError(
+                "LANGGRAPH_DATABASE_URL is not configured."
             )
-            return
 
-        final_message = messages[-1]
+        # AsyncPostgresSaver 会自动管理异步连接生命周期。
+        async with AsyncPostgresSaver.from_conn_string(
+            langgraph_database_url,
+        ) as checkpointer:
 
-        content = getattr(
-            final_message,
-            "content",
-            "",
-        )
+            # 第一次使用时创建 checkpoint 相关表。
+            #
+            # setup() 是幂等的：
+            # 已存在的 migration 不会重复创建。
+            await checkpointer.setup()
 
-        print(
-            "\n========== Final Answer =========="
-        )
+            # ======================================================
+            # 11. Enterprise Graph
+            # ======================================================
 
-        print(
-            content
-        )
+            graph = build_enterprise_graph(
+                model=model,
+                registry=registry,
+                permission_policy=permission_policy,
+                middleware=agent_middleware,
+                memory_manager=memory_manager,
+                checkpointer=checkpointer,
+            )
+
+            # ======================================================
+            # 12. Initial Graph State
+            #
+            # 使用 HumanMessage，而不是：
+            #
+            #     {"role": "user", "content": "..."}
+            #
+            # 因为 Memory Retrieval Node 会从
+            # LangChain BaseMessage 中提取当前 Query。
+            # ======================================================
+
+            initial_state = {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "请搜索一下最近 DeepSeek 发布的最新模型，"
+                            "并总结其主要更新内容。"
+                        )
+                    )
+                ],
+                "retrieved_memories": [],
+                "current_agent": None,
+                "next_agent": None,
+                "task_status": "running",
+                "handoff_reason": None,
+                "tool_results": [],
+                "approval_required": False,
+                "approval_status": None,
+                "error": None,
+                "retry_count": 0,
+                "final_answer": None,
+            }
+
+            # ======================================================
+            # 13. Execute Enterprise Workflow
+            # ======================================================
+
+            response = await graph.ainvoke(
+                initial_state,
+                config=config,
+                context=context,
+            )
+
+            # ======================================================
+            # 14. Output
+            # ======================================================
+
+            print(
+                "\n========== Workflow Result =========="
+            )
+
+            print(
+                "Selected Agent:",
+                response.get(
+                    "current_agent"
+                ),
+            )
+
+            print(
+                "Task Status:",
+                response.get(
+                    "task_status"
+                ),
+            )
+
+            print(
+                "Routing Reason:",
+                response.get(
+                    "handoff_reason"
+                ),
+            )
+
+            retrieved_memories = response.get(
+                "retrieved_memories",
+                [],
+            )
+
+            print(
+                "Retrieved Memories:",
+                retrieved_memories,
+            )
+
+            messages = response.get(
+                "messages",
+                [],
+            )
+
+            if not messages:
+                print(
+                    "Agent 未返回消息。"
+                )
+                return
+
+            final_message = messages[-1]
+
+            content = getattr(
+                final_message,
+                "content",
+                "",
+            )
+
+            print(
+                "\n========== Final Answer =========="
+            )
+
+            print(
+                content
+            )
+
+        # ==========================================================
+        # 15. Cleanup Long-term Memory
+        # ==========================================================
+
+        await memory_manager.close()
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 
 from memories.long_memory.manager import MemoryManager
@@ -43,6 +44,7 @@ def build_enterprise_graph(
         permission_policy: PermissionPolicy,
         middleware: list[Any] | None = None,
         memory_manager: MemoryManager | None = None,
+        checkpointer: AsyncPostgresSaver | None = None,
 ):
     """
     构建 Enterprise Multi-Agent Workflow。
@@ -79,6 +81,14 @@ def build_enterprise_graph(
         RiskPolicy / HITL
               ↓
         Tool Execution
+
+    LangGraph Persistence：
+
+        Graph State
+              ↓
+        PostgreSQL Checkpointer
+              ↓
+        Checkpoint / HITL Resume / Recovery
     """
 
     graph = StateGraph(
@@ -229,12 +239,12 @@ def build_enterprise_graph(
     # 当前阶段：
     # Specialist 完成后结束 Workflow。
     #
-    # 后续再增加：
-    #   - Recovery
-    #   - Re-route
-    #   - Handoff
-    #   - Memory Persist
-    #   - Parallel Execution
+    # 后续：
+    #   Recovery
+    #   Re-route
+    #   Handoff
+    #   Memory Persistence
+    #   Parallel Execution
     # ==============================================================
 
     graph.add_edge(
@@ -257,4 +267,12 @@ def build_enterprise_graph(
         END,
     )
 
-    return graph.compile()
+    # ==============================================================
+    # 10. Compile
+    #
+    # checkpointer 非空时启用 LangGraph PostgreSQL Persistence。
+    # ==============================================================
+
+    return graph.compile(
+        checkpointer=checkpointer,
+    )
