@@ -175,7 +175,7 @@ async def main() -> None:
              "messages": [
     {
         "role": "user",
-        "content": "请检查一下 payment-service 的状态"
+        "content": "请搜索一下最近 DeepSeek 发布的最新模型，并总结其主要更新内容。"
     }
 ],
             "retrieved_memories": [],

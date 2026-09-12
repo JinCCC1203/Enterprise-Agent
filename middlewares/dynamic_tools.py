@@ -33,15 +33,23 @@ class DynamicToolMiddleware(AgentMiddleware):
         self.agent_name = agent_name
 
     def _get_exposed_tools(
-        self,
-        request: ModelRequest,
+            self,
+            request: ModelRequest,
     ):
         role = request.runtime.context.user_role
 
-        return self.tool_exposure.expose(
+        exposed_tools = self.tool_exposure.expose(
             role=role,
         )
 
+        print(
+            "[Tool Exposure] "
+            f"agent={self.agent_name} "
+            f"role={role} "
+            f"tools={[tool.name for tool in exposed_tools]}"
+        )
+
+        return exposed_tools
     def wrap_model_call(
         self,
         request: ModelRequest,
