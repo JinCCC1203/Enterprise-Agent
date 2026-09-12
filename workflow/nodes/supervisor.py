@@ -35,7 +35,7 @@ class SupervisorDecision(BaseModel):
 
     task:
         对当前任务进行简要描述，
-        供后续 Specialist Agent 理解 Supervisor 的决策。
+        供后续 Specialist Agent 理解。
     """
 
     next_agent: SupervisorAgent = Field(
@@ -43,18 +43,23 @@ class SupervisorDecision(BaseModel):
             "The next agent to execute. "
             "Must be one of: "
             "knowledge_agent, operations_agent, "
-            "ticket_agent, notification_agent, end."
+            "ticket_agent, research_agent, end."
         )
     )
 
     reason: str = Field(
         min_length=1,
-        description="Reason for routing the task.",
+        description=(
+            "Reason for routing the task."
+        ),
     )
 
     task: str = Field(
         min_length=1,
-        description="Concise task description for the next agent.",
+        description=(
+            "Concise task description for the "
+            "next agent."
+        ),
     )
 
 
@@ -86,11 +91,19 @@ def create_supervisor_node(
     它只负责产生路由决策。
     """
 
+    # ------------------------------------------------------------------
+    # JSON Mode
+    # ------------------------------------------------------------------
+
     json_model = model.bind(
         response_format={
             "type": "json_object",
         }
     )
+
+    # ------------------------------------------------------------------
+    # Supervisor Node
+    # ------------------------------------------------------------------
 
     async def supervisor_node(
         state: EnterpriseAgentState,
@@ -111,9 +124,9 @@ def create_supervisor_node(
             [],
         )
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # 1. 获取当前用户请求
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         user_query = _extract_latest_user_query(
             messages
@@ -128,9 +141,9 @@ def create_supervisor_node(
                 ),
             }
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # 2. 构造 Supervisor Prompt
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         prompt = _build_supervisor_prompt(
             user_query=user_query,
@@ -138,34 +151,43 @@ def create_supervisor_node(
             state=state,
         )
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # 3. 调用 LLM
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         response = await json_model.ainvoke(
             prompt,
             config=config,
         )
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # 4. 提取模型输出
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         raw_content = _extract_response_content(
             response.content
         )
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # 5. JSON Parse + Pydantic Validation
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
 
         decision = _parse_decision(
             raw_content
         )
 
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------
         # 6. 写入 Graph State
-        # ----------------------------------------------------------
+        #
+        # 当前 State 暂时只保存：
+        #   - next_agent
+        #   - handoff_reason
+        #   - task_status
+        #
+        # decision.task 暂时不写入，
+        # 因为当前 EnterpriseAgentState 尚未定义
+        # delegated_task / agent_task 字段。
+        # --------------------------------------------------------------
 
         return {
             "next_agent": decision.next_agent,
@@ -190,11 +212,16 @@ def _build_supervisor_prompt(
     构建 Supervisor Prompt。
 
     Supervisor 只负责：
+
         task understanding
         agent selection
         routing reason
 
-    不负责工具调用。
+    不负责：
+
+        tool calling
+        tool execution
+        final answer generation
     """
 
     memories_text = (
@@ -225,29 +252,54 @@ Available specialist agents:
 1. knowledge_agent
    - Enterprise knowledge retrieval
    - RAG search
-   - Documents, policies, internal knowledge
+   - Internal documents
+   - Policies
+   - Product documentation
+   - Enterprise knowledge base questions
 
 2. operations_agent
    - Service health
    - System status
    - Operational diagnostics
-   - Read-only infrastructure operations
+   - Infrastructure status
+   - Read-only operational queries
 
 3. ticket_agent
    - Query tickets
    - Create tickets
    - Update tickets
+   - Incident handling
    - Ticket lifecycle operations
 
-4. notification_agent
-   - Send notifications
-   - External communication
-   - Potentially high-risk side effects
+4. research_agent
+   - External web search
+   - Public internet information
+   - Current or time-sensitive information
+   - Public technical documentation
+   - External research
+   - News and other publicly available information
 
 5. end
    - Use when the task is already complete,
      unnecessary to call another specialist,
      or the request cannot be meaningfully routed.
+
+Routing guidelines:
+
+- Use knowledge_agent for internal enterprise knowledge.
+- Use operations_agent for current system/service status.
+- Use ticket_agent for ticket or incident lifecycle operations.
+- Use research_agent for information that requires external
+  web search or current public information.
+- Use end only when no specialist agent is required.
+
+Important:
+
+- Do not confuse internal RAG with external web search.
+- knowledge_agent uses the enterprise knowledge base.
+- research_agent uses the external web_search tool.
+- Do not select an agent merely because a tool exists.
+  Select the specialist based on the user's actual task.
 
 Current user query:
 {user_query}
@@ -266,9 +318,9 @@ Return ONLY valid JSON.
 Required format:
 
 {{
-  "next_agent": "knowledge_agent | operations_agent | ticket_agent | notification_agent | end",
-  "reason": "Why this agent should handle the task",
-  "task": "Concise description of the task for the next agent"
+  "next_agent": "knowledge_agent | operations_agent | ticket_agent | research_agent | end",
+  "reason": "Why this specialist agent should handle the task",
+  "task": "Concise description of the task for the selected specialist agent"
 }}
 """.strip()
 
@@ -293,6 +345,10 @@ def _extract_latest_user_query(
 
         content = message.content
 
+        # --------------------------------------------------------------
+        # 普通字符串消息
+        # --------------------------------------------------------------
+
         if isinstance(
             content,
             str,
@@ -301,6 +357,10 @@ def _extract_latest_user_query(
 
             if content:
                 return content
+
+        # --------------------------------------------------------------
+        # LangChain content block
+        # --------------------------------------------------------------
 
         if isinstance(
             content,
@@ -314,7 +374,9 @@ def _extract_latest_user_query(
                     block,
                     str,
                 ):
-                    text_parts.append(block)
+                    text_parts.append(
+                        block
+                    )
                     continue
 
                 if not isinstance(
@@ -331,7 +393,9 @@ def _extract_latest_user_query(
                     text,
                     str,
                 ):
-                    text_parts.append(text)
+                    text_parts.append(
+                        text
+                    )
 
             query = "".join(
                 text_parts
@@ -368,7 +432,9 @@ def _extract_response_content(
                 block,
                 str,
             ):
-                text_parts.append(block)
+                text_parts.append(
+                    block
+                )
                 continue
 
             if not isinstance(
@@ -385,14 +451,17 @@ def _extract_response_content(
                 text,
                 str,
             ):
-                text_parts.append(text)
+                text_parts.append(
+                    text
+                )
 
         return "".join(
             text_parts
         ).strip()
 
     raise ValueError(
-        "Supervisor model returned unsupported content type."
+        "Supervisor model returned "
+        "unsupported content type."
     )
 
 
@@ -410,7 +479,10 @@ def _parse_decision(
 
     cleaned = raw_content.strip()
 
+    # ------------------------------------------------------------------
     # 防御性处理 Markdown JSON Fence
+    # ------------------------------------------------------------------
+
     if cleaned.startswith(
         "```"
     ):
@@ -419,12 +491,20 @@ def _parse_decision(
         if lines:
             lines = lines[1:]
 
-        if lines and lines[-1].strip() == "```":
+        if (
+            lines
+            and lines[-1].strip()
+            == "```"
+        ):
             lines = lines[:-1]
 
         cleaned = "\n".join(
             lines
         ).strip()
+
+    # ------------------------------------------------------------------
+    # JSON Parse
+    # ------------------------------------------------------------------
 
     try:
         payload = json.loads(
@@ -436,9 +516,15 @@ def _parse_decision(
             "Supervisor returned invalid JSON."
         ) from exc
 
+    # ------------------------------------------------------------------
+    # Pydantic Validation
+    # ------------------------------------------------------------------
+
     try:
-        decision = SupervisorDecision.model_validate(
-            payload
+        decision = (
+            SupervisorDecision.model_validate(
+                payload
+            )
         )
 
     except ValidationError as exc:

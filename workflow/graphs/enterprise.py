@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
 from memories.long_memory.manager import MemoryManager
+from policies.permission import PermissionPolicy
+from tools_manager.registry import ToolRegistry
 
 from workflow.nodes.knowledge_agent import (
     create_knowledge_agent,
@@ -36,14 +37,12 @@ from workflow.state import (
 
 
 def build_enterprise_graph(
-    *,
-    model: ChatOpenAI,
-    knowledge_tools: list[BaseTool],
-    operations_tools: list[BaseTool],
-    ticket_tools: list[BaseTool],
-    research_tools: list[BaseTool],
-    memory_manager: MemoryManager | None = None,
-    middleware: list[Any] | None = None,
+        *,
+        model: ChatOpenAI,
+        registry: ToolRegistry,
+        permission_policy: PermissionPolicy,
+        middleware: list[Any] | None = None,
+        memory_manager: MemoryManager | None = None,
 ):
     """
     构建 Enterprise Multi-Agent Workflow。
@@ -65,22 +64,21 @@ def build_enterprise_graph(
 
     Specialist Agent 内部：
 
-        Specialist Agent
+        Global ToolRegistry
+              ↓
+        ToolRegistryView
+              ↓
+        Specialist Tool Scope
+              ↓
+        PermissionPolicy
+              ↓
+        DynamicToolMiddleware
               ↓
         LLM Tool Calling
               ↓
-        Tool Governance
+        RiskPolicy / HITL
               ↓
         Tool Execution
-
-    说明：
-        1. Supervisor 负责“选择哪个 Specialist”。
-        2. Specialist 负责“如何完成任务”。
-        3. Tool Calling 由 Specialist 内部 LLM 完成。
-        4. Router 只负责 Conditional Routing。
-        5. Memory Retrieval 是 Workflow 级别操作。
-        6. user_id / role / tenant_id 等安全上下文来自
-           EnterpriseAgentContext，而不是 Graph State。
     """
 
     graph = StateGraph(
@@ -88,18 +86,15 @@ def build_enterprise_graph(
         context_schema=EnterpriseAgentContext,
     )
 
-    # ==============================================================
-    # Middleware
-    # ==============================================================
-
-    shared_middleware = middleware or []
+    shared_middleware = list(
+        middleware or []
+    )
 
     # ==============================================================
-    # 1. Memory Retrieval Node
+    # 1. Memory Retrieval
     # ==============================================================
 
     if memory_manager is not None:
-
         memory_retrieval_node = (
             create_memory_retrieval_node(
                 memory_manager=memory_manager,
@@ -113,7 +108,7 @@ def build_enterprise_graph(
         )
 
     # ==============================================================
-    # 2. Supervisor Node
+    # 2. Supervisor
     # ==============================================================
 
     supervisor_node = create_supervisor_node(
@@ -126,12 +121,13 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 3. Knowledge Specialist Agent
+    # 3. Knowledge Agent
     # ==============================================================
 
     knowledge_agent_node = create_knowledge_agent(
         model=model,
-        tools=knowledge_tools,
+        registry=registry,
+        permission_policy=permission_policy,
         middleware=shared_middleware,
     )
 
@@ -141,12 +137,13 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 4. Operations Specialist Agent
+    # 4. Operations Agent
     # ==============================================================
 
     operations_agent_node = create_operations_agent(
         model=model,
-        tools=operations_tools,
+        registry=registry,
+        permission_policy=permission_policy,
         middleware=shared_middleware,
     )
 
@@ -156,12 +153,13 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 5. Ticket Specialist Agent
+    # 5. Ticket Agent
     # ==============================================================
 
     ticket_agent_node = create_ticket_agent(
         model=model,
-        tools=ticket_tools,
+        registry=registry,
+        permission_policy=permission_policy,
         middleware=shared_middleware,
     )
 
@@ -171,12 +169,13 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 6. Research Specialist Agent
+    # 6. Research Agent
     # ==============================================================
 
     research_agent_node = create_research_agent(
         model=model,
-        tools=research_tools,
+        registry=registry,
+        permission_policy=permission_policy,
         middleware=shared_middleware,
     )
 
@@ -203,8 +202,6 @@ def build_enterprise_graph(
 
     else:
 
-        # Memory 系统未启用时，
-        # 允许直接进入 Supervisor。
         graph.add_edge(
             START,
             "supervisor",
@@ -229,16 +226,15 @@ def build_enterprise_graph(
     # ==============================================================
     # 9. Specialist → END
     #
-    # 当前阶段先让 Specialist 完成后结束。
+    # 当前阶段：
+    # Specialist 完成后结束 Workflow。
     #
-    # 后续加入：
-    #   - recovery
-    #   - retry
-    #   - handoff
-    #   - parallel execution
-    #   - memory persist
-    #
-    # 后，这里会进一步扩展。
+    # 后续再增加：
+    #   - Recovery
+    #   - Re-route
+    #   - Handoff
+    #   - Memory Persist
+    #   - Parallel Execution
     # ==============================================================
 
     graph.add_edge(
