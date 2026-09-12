@@ -91,24 +91,15 @@ def create_supervisor_node(
     它只负责产生路由决策。
     """
 
-    # ------------------------------------------------------------------
-    # JSON Mode
-    # ------------------------------------------------------------------
-
     json_model = model.bind(
         response_format={
             "type": "json_object",
         }
     )
 
-    # ------------------------------------------------------------------
-    # Supervisor Node
-    # ------------------------------------------------------------------
-
     async def supervisor_node(
         state: EnterpriseAgentState,
         runtime: Runtime[EnterpriseAgentContext],
-        config: Any,
     ) -> dict[str, Any]:
         """
         LangGraph Supervisor Node。
@@ -157,7 +148,6 @@ def create_supervisor_node(
 
         response = await json_model.ainvoke(
             prompt,
-            config=config,
         )
 
         # --------------------------------------------------------------
@@ -178,15 +168,6 @@ def create_supervisor_node(
 
         # --------------------------------------------------------------
         # 6. 写入 Graph State
-        #
-        # 当前 State 暂时只保存：
-        #   - next_agent
-        #   - handoff_reason
-        #   - task_status
-        #
-        # decision.task 暂时不写入，
-        # 因为当前 EnterpriseAgentState 尚未定义
-        # delegated_task / agent_task 字段。
         # --------------------------------------------------------------
 
         return {

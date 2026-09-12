@@ -41,6 +41,7 @@ from workflow.graphs.enterprise import (
 from workflow.state import (
     EnterpriseAgentContext,
 )
+from langchain_core.messages import HumanMessage
 
 
 load_dotenv()
@@ -171,14 +172,10 @@ async def main() -> None:
         # ==========================================================
 
         initial_state = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "请检查一下 "
-                        "payment-service 的状态"
-                    ),
-                }
+             "messages": [
+        HumanMessage(
+            content="请检查一下 payment-service 的状态"
+        )
             ],
             "retrieved_memories": [],
             "current_agent": None,

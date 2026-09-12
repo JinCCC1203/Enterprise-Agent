@@ -18,7 +18,7 @@ from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
-
+from langchain_core.runnables import RunnableConfig
 
 OPERATIONS_TOOL_SCOPE = frozenset(
     {
@@ -110,7 +110,7 @@ def create_operations_agent(
     async def operations_agent_node(
         state: EnterpriseAgentState,
         runtime: Runtime[EnterpriseAgentContext],
-        config: Any,
+        config: RunnableConfig,
     ) -> dict[str, Any]:
         """
         Operations Specialist Graph Node。

@@ -18,7 +18,7 @@ from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
-
+from langchain_core.runnables import RunnableConfig
 
 RESEARCH_TOOL_SCOPE = frozenset(
     {
@@ -149,7 +149,7 @@ def create_research_agent(
     async def research_agent_node(
         state: EnterpriseAgentState,
         runtime: Runtime[EnterpriseAgentContext],
-        config: Any,
+        config: RunnableConfig,
     ) -> dict[str, Any]:
         """
         Research Specialist Graph Node。

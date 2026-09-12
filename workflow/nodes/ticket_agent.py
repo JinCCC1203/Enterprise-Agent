@@ -18,6 +18,7 @@ from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
+from langchain_core.runnables import RunnableConfig
 
 
 TICKET_TOOL_SCOPE = frozenset(
@@ -129,7 +130,7 @@ def create_ticket_agent(
     async def ticket_agent_node(
         state: EnterpriseAgentState,
         runtime: Runtime[EnterpriseAgentContext],
-        config: Any,
+        config: RunnableConfig,
     ) -> dict[str, Any]:
         """
         Ticket Specialist Graph Node。

@@ -18,6 +18,7 @@ from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
+from langchain_core.runnables import RunnableConfig
 
 
 KNOWLEDGE_TOOL_SCOPE = frozenset(
@@ -130,7 +131,7 @@ def create_knowledge_agent(
     async def knowledge_agent_node(
         state: EnterpriseAgentState,
         runtime: Runtime[EnterpriseAgentContext],
-        config: Any,
+        config: RunnableConfig,
     ) -> dict[str, Any]:
         """
         Knowledge Specialist Graph Node。
