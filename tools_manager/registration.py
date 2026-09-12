@@ -14,16 +14,16 @@ from tools_manager.metadata import (
 from tools_manager.registry import ToolRegistry
 
 
-# ---------------------------------------------------------------------------
-# MCP Tool Governance Metadata
-# ---------------------------------------------------------------------------
-
 MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
     "get_service_health": ToolMetadata(
         name="get_service_health",
         category="operations",
         permissions=frozenset(
-            {"employee", "developer", "admin"}
+            {
+                "employee",
+                "developer",
+                "admin",
+            }
         ),
         tags=frozenset(
             {
@@ -46,7 +46,11 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         name="get_ticket",
         category="ticketing",
         permissions=frozenset(
-            {"employee", "developer", "admin"}
+            {
+                "employee",
+                "developer",
+                "admin",
+            }
         ),
         tags=frozenset(
             {
@@ -68,7 +72,10 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         name="create_ticket",
         category="ticketing",
         permissions=frozenset(
-            {"developer", "admin"}
+            {
+                "developer",
+                "admin",
+            }
         ),
         tags=frozenset(
             {
@@ -90,7 +97,10 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         name="update_ticket",
         category="ticketing",
         permissions=frozenset(
-            {"developer", "admin"}
+            {
+                "developer",
+                "admin",
+            }
         ),
         tags=frozenset(
             {
@@ -113,7 +123,10 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         name="send_notification",
         category="communication",
         permissions=frozenset(
-            {"developer", "admin"}
+            {
+                "developer",
+                "admin",
+            }
         ),
         tags=frozenset(
             {
@@ -130,22 +143,53 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
             "Send a notification to an enterprise communication channel."
         ),
     ),
+
+    "web_search": ToolMetadata(
+        name="web_search",
+        category="research",
+        permissions=frozenset(
+            {
+                "employee",
+                "developer",
+                "admin",
+            }
+        ),
+        tags=frozenset(
+            {
+                "mcp",
+                "research",
+                "web",
+                "search",
+                "external",
+                "read",
+                "internet",
+            }
+        ),
+        source=ToolSource.MCP,
+        risk_level=ToolRiskLevel.LOW,
+        description=(
+            "Search publicly available information on the internet."
+        ),
+    ),
 }
 
 
-def _metadata_for_mcp_tool(tool) -> ToolMetadata:
+def _metadata_for_mcp_tool(
+    tool,
+) -> ToolMetadata:
     """
     根据 MCP Tool 名称获取治理 Metadata。
 
     对未知 Tool 采用保守策略：
+
     - category = external
     - 仅允许 developer/admin
     - risk = HIGH
-
-    防止未来 MCP Server 新增 Tool 后，
-    因为没有显式 metadata 而被错误地当成 LOW/MEDIUM 风险 Tool。
     """
-    metadata = MCP_TOOL_METADATA.get(tool.name)
+
+    metadata = MCP_TOOL_METADATA.get(
+        tool.name
+    )
 
     if metadata is not None:
         return metadata
@@ -154,7 +198,10 @@ def _metadata_for_mcp_tool(tool) -> ToolMetadata:
         name=tool.name,
         category="external",
         permissions=frozenset(
-            {"developer", "admin"}
+            {
+                "developer",
+                "admin",
+            }
         ),
         tags=frozenset(
             {
@@ -173,11 +220,13 @@ def _metadata_for_mcp_tool(tool) -> ToolMetadata:
 
 
 @asynccontextmanager
-async def create_tool_registry() -> AsyncIterator[ToolRegistry]:
+async def create_tool_registry(
+) -> AsyncIterator[ToolRegistry]:
     """
     创建并维护 Agent Runtime 的统一 ToolRegistry。
 
     Registry 中统一管理：
+
     1. Local Tool
     2. MCP Tool
 
@@ -198,9 +247,9 @@ async def create_tool_registry() -> AsyncIterator[ToolRegistry]:
 
     registry = ToolRegistry()
 
-    # -----------------------------------------------------------------------
-    # 1. 注册本地 RAG Tool
-    # -----------------------------------------------------------------------
+    # ======================================================================
+    # 1. Local RAG Tool
+    # ======================================================================
 
     registry.register(
         rag_search,
@@ -208,7 +257,11 @@ async def create_tool_registry() -> AsyncIterator[ToolRegistry]:
             name=rag_search.name,
             category="knowledge",
             permissions=frozenset(
-                {"employee", "developer", "admin"}
+                {
+                    "employee",
+                    "developer",
+                    "admin",
+                }
             ),
             tags=frozenset(
                 {
@@ -220,18 +273,22 @@ async def create_tool_registry() -> AsyncIterator[ToolRegistry]:
             ),
             source=ToolSource.LOCAL,
             risk_level=ToolRiskLevel.LOW,
-            description="Search the enterprise knowledge base.",
+            description=(
+                "Search the enterprise knowledge base."
+            ),
         ),
     )
 
-    # -----------------------------------------------------------------------
-    # 2. 创建 MCP Session
-    # -----------------------------------------------------------------------
+    # ======================================================================
+    # 2. MCP Session
+    # ======================================================================
 
     async with mcp_session() as session:
 
         # 获取 MCP Server 暴露的原始 Tools
-        raw_mcp_tools = await get_mcp_tools(session)
+        raw_mcp_tools = await get_mcp_tools(
+            session
+        )
 
         # 转换为 LangChain StructuredTool
         mcp_tools = convert_mcp_tools(
@@ -239,21 +296,23 @@ async def create_tool_registry() -> AsyncIterator[ToolRegistry]:
             raw_mcp_tools,
         )
 
-        # -------------------------------------------------------------------
-        # 3. 将 MCP Tools 统一注册进入 ToolRegistry
-        # -------------------------------------------------------------------
+        # ==================================================================
+        # 3. 注册 MCP Tools
+        # ==================================================================
 
         for tool in mcp_tools:
 
-            metadata = _metadata_for_mcp_tool(tool)
+            metadata = _metadata_for_mcp_tool(
+                tool
+            )
 
             registry.register(
                 tool,
                 metadata,
             )
 
-        # -------------------------------------------------------------------
-        # 4. 将完整 Registry 提供给 Agent Runtime
-        # -------------------------------------------------------------------
+        # ==================================================================
+        # 4. Yield Registry
+        # ==================================================================
 
         yield registry
