@@ -25,10 +25,12 @@ class DynamicToolMiddleware(AgentMiddleware):
         self,
         *,
         tool_exposure: PermissionBasedToolExposure,
+        agent_name: str,
     ) -> None:
         super().__init__()
 
         self.tool_exposure = tool_exposure
+        self.agent_name = agent_name
 
     def _get_exposed_tools(
         self,
@@ -51,6 +53,13 @@ class DynamicToolMiddleware(AgentMiddleware):
 
         exposed_tools = self._get_exposed_tools(
             request
+        )
+
+        print(
+            "[Tool Exposure] "
+            f"agent={self.agent_name} "
+            f"role={request.runtime.context.user_role} "
+            f"tools={[tool.name for tool in exposed_tools]}"
         )
 
         new_request = request.override(

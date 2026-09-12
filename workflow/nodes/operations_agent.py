@@ -70,6 +70,7 @@ def create_operations_agent(
 
     dynamic_tools = DynamicToolMiddleware(
         tool_exposure=tool_exposure,
+        agent_name="operations_agent",
     )
 
     # ------------------------------------------------------------------

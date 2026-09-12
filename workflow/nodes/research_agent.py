@@ -91,6 +91,7 @@ def create_research_agent(
 
     dynamic_tools = DynamicToolMiddleware(
         tool_exposure=tool_exposure,
+        agent_name="research_agent",
     )
 
     # ------------------------------------------------------------------

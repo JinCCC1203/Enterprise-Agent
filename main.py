@@ -173,10 +173,11 @@ async def main() -> None:
 
         initial_state = {
              "messages": [
-        HumanMessage(
-            content="请检查一下 payment-service 的状态"
-        )
-            ],
+    {
+        "role": "user",
+        "content": "请检查一下 payment-service 的状态"
+    }
+],
             "retrieved_memories": [],
             "current_agent": None,
             "next_agent": None,

@@ -90,6 +90,7 @@ def create_ticket_agent(
 
     dynamic_tools = DynamicToolMiddleware(
         tool_exposure=tool_exposure,
+        agent_name="ticket_agent",
     )
 
     # ------------------------------------------------------------------

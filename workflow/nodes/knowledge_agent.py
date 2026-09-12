@@ -85,6 +85,7 @@ def create_knowledge_agent(
 
     dynamic_tools = DynamicToolMiddleware(
         tool_exposure=tool_exposure,
+        agent_name="knowledge_agent",
     )
 
     # ------------------------------------------------------------------

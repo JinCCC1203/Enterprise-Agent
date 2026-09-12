@@ -99,7 +99,6 @@ def create_supervisor_node(
 
     async def supervisor_node(
         state: EnterpriseAgentState,
-        runtime: Runtime[EnterpriseAgentContext],
     ) -> dict[str, Any]:
         """
         LangGraph Supervisor Node。
@@ -307,99 +306,120 @@ Required format:
 
 
 def _extract_latest_user_query(
-    messages: list[BaseMessage],
+    messages: list[Any],
 ) -> str:
     """
     从 Graph Message State 中取得最后一条用户消息。
+
+    同时兼容两种输入格式：
+
+    1. LangChain BaseMessage
+       HumanMessage(content="...")
+
+    2. OpenAI-style message dict
+       {
+           "role": "user",
+           "content": "..."
+       }
+
+    Graph 内部最终仍建议统一使用 LangChain BaseMessage。
+    这里的 dict 支持主要用于兼容不同调用入口。
     """
 
     for message in reversed(messages):
 
-        message_type = getattr(
-            message,
-            "type",
-            None,
-        )
+        # ==============================================================
+        # 1. LangChain BaseMessage
+        # ==============================================================
 
-        if message_type != "human":
+        if isinstance(
+            message,
+            BaseMessage,
+        ):
+            message_type = getattr(
+                message,
+                "type",
+                None,
+            )
+
+            if message_type != "human":
+                continue
+
+            content = message.content
+
+            text = _extract_text_content(
+                content
+            )
+
+            if text:
+                return text
+
             continue
 
-        content = message.content
-
-        # --------------------------------------------------------------
-        # 普通字符串消息
-        # --------------------------------------------------------------
+        # ==============================================================
+        # 2. OpenAI-style message dict
+        # ==============================================================
 
         if isinstance(
-            content,
-            str,
+            message,
+            dict,
         ):
-            content = content.strip()
+            role = message.get(
+                "role"
+            )
 
-            if content:
-                return content
+            if role != "user":
+                continue
 
-        # --------------------------------------------------------------
-        # LangChain content block
-        # --------------------------------------------------------------
+            content = message.get(
+                "content"
+            )
 
-        if isinstance(
-            content,
-            list,
-        ):
-            text_parts: list[str] = []
+            text = _extract_text_content(
+                content
+            )
 
-            for block in content:
-
-                if isinstance(
-                    block,
-                    str,
-                ):
-                    text_parts.append(
-                        block
-                    )
-                    continue
-
-                if not isinstance(
-                    block,
-                    dict,
-                ):
-                    continue
-
-                text = block.get(
-                    "text"
-                )
-
-                if isinstance(
-                    text,
-                    str,
-                ):
-                    text_parts.append(
-                        text
-                    )
-
-            query = "".join(
-                text_parts
-            ).strip()
-
-            if query:
-                return query
+            if text:
+                return text
 
     return ""
 
 
-def _extract_response_content(
+def _extract_text_content(
     content: Any,
 ) -> str:
     """
-    兼容不同 ChatModel response.content 格式。
+    从不同类型的 message.content 中提取纯文本。
+
+    支持：
+
+    1. str
+
+    2. LangChain / OpenAI 风格 content blocks：
+
+       [
+           {
+               "type": "text",
+               "text": "..."
+           }
+       ]
+
+    3. 简单字符串列表。
     """
+
+    # ------------------------------------------------------------------
+    # 普通字符串
+    # ------------------------------------------------------------------
 
     if isinstance(
         content,
         str,
     ):
         return content.strip()
+
+    # ------------------------------------------------------------------
+    # Content Block List
+    # ------------------------------------------------------------------
 
     if isinstance(
         content,
@@ -440,9 +460,18 @@ def _extract_response_content(
             text_parts
         ).strip()
 
-    raise ValueError(
-        "Supervisor model returned "
-        "unsupported content type."
+    return ""
+
+
+def _extract_response_content(
+    content: Any,
+) -> str:
+    """
+    兼容不同 ChatModel response.content 格式。
+    """
+
+    return _extract_text_content(
+        content
     )
 
 
