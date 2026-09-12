@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 
 from dotenv import load_dotenv
 from langchain.agents.middleware import (
@@ -53,6 +54,8 @@ from workflow.state import (
 
 load_dotenv()
 
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 async def main() -> None:
 

@@ -11,7 +11,7 @@ from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
-
+from langchain_core.runnables import RunnableConfig
 
 def create_memory_retrieval_node(
     *,
@@ -50,7 +50,7 @@ def create_memory_retrieval_node(
     async def memory_retrieval_node(
         state: EnterpriseAgentState,
         runtime: Runtime[EnterpriseAgentContext],
-        config: Any,
+        config: RunnableConfig,
     ) -> dict[str, Any]:
         """
         LangGraph Memory Retrieval Node。
