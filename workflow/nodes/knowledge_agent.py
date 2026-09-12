@@ -2,47 +2,130 @@ from __future__ import annotations
 
 from typing import Any
 
+from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.runtime import Runtime
-from langchain.agents import create_agent
 
+from middlewares.dynamic_tools import DynamicToolMiddleware
+from policies.permission import PermissionPolicy
+from tools_manager.registry import ToolRegistry
+from tools_manager.tool_exposure import (
+    PermissionBasedToolExposure,
+)
 from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
 
 
+KNOWLEDGE_TOOL_SCOPE = frozenset(
+    {
+        "rag_search",
+    }
+)
+
+
 def create_knowledge_agent(
     *,
     model: ChatOpenAI,
-    tools: list[BaseTool],
+    registry: ToolRegistry,
+    permission_policy: PermissionPolicy,
     middleware: list[Any] | None = None,
 ):
     """
     创建 Knowledge Specialist Agent。
 
+    Specialist Scope:
+        rag_search
+
     职责：
-        - 企业知识库问答
-        - 企业文档检索
-        - RAG 查询
-        - 基于内部知识进行回答
+        - 企业知识库查询
+        - 内部文档检索
+        - RAG 问答
+        - 企业知识分析
 
-    工具：
-        - rag_search
+    Tool Governance：
 
-    注意：
-        Tool Calling 由该 Agent 内部的 LLM 决定。
-        本 Node 不自己判断何时调用 rag_search。
+        Global ToolRegistry
+                ↓
+        Knowledge ToolRegistryView
+                ↓
+            rag_search
+                ↓
+        PermissionPolicy
+                ↓
+        DynamicToolMiddleware
+                ↓
+        LLM Tool Calling
     """
+
+    # ------------------------------------------------------------------
+    # 1. 创建 Knowledge Specialist 的受限 Registry View
+    # ------------------------------------------------------------------
+
+    registry_view = registry.create_view(
+        KNOWLEDGE_TOOL_SCOPE
+    )
+
+    # ------------------------------------------------------------------
+    # 2. 创建 Tool Exposure
+    # ------------------------------------------------------------------
+
+    tool_exposure = PermissionBasedToolExposure(
+        registry_view=registry_view,
+        permission_policy=permission_policy,
+    )
+
+    # ------------------------------------------------------------------
+    # 3. 创建 Dynamic Tool Middleware
+    # ------------------------------------------------------------------
+
+    dynamic_tools = DynamicToolMiddleware(
+        tool_exposure=tool_exposure,
+    )
+
+    # ------------------------------------------------------------------
+    # 4. 组装 Middleware
+    #
+    # 注意：
+    # middleware 参数中不要再次放入旧的
+    # DynamicToolMiddleware。
+    # ------------------------------------------------------------------
+
+    agent_middleware = list(
+        middleware or []
+    )
+
+    agent_middleware.append(
+        dynamic_tools
+    )
+
+    # ------------------------------------------------------------------
+    # 5. Specialist Agent 初始 Tool 集合
+    #
+    # 这里使用 Registry View，而不是 Global Registry。
+    # ------------------------------------------------------------------
+
+    tools: list[BaseTool] = (
+        registry_view.get_all_tools()
+    )
+
+    # ------------------------------------------------------------------
+    # 6. 创建 LangChain Agent
+    # ------------------------------------------------------------------
 
     agent = create_agent(
         model=model,
         tools=tools,
-        middleware=middleware or [],
+        middleware=agent_middleware,
         context_schema=EnterpriseAgentContext,
     )
+
+    # ------------------------------------------------------------------
+    # 7. LangGraph Node
+    # ------------------------------------------------------------------
 
     async def knowledge_agent_node(
         state: EnterpriseAgentState,
@@ -50,17 +133,7 @@ def create_knowledge_agent(
         config: Any,
     ) -> dict[str, Any]:
         """
-        Knowledge Agent Node。
-
-        Graph State
-            ↓
-        Agent
-            ↓
-        Tool Calling
-            ↓
-        Result
-            ↓
-        Graph State
+        Knowledge Specialist Graph Node。
         """
 
         messages = state.get(
@@ -73,15 +146,13 @@ def create_knowledge_agent(
             [],
         )
 
-        # 将 Supervisor 之前检索到的长期记忆
-        # 作为当前 Specialist 的上下文之一。
         memory_context = _build_memory_context(
             retrieved_memories
         )
 
-        # Knowledge Agent 的输入使用当前 workflow
-        # message history + memory context。
-        agent_messages = list(messages)
+        agent_messages = list(
+            messages
+        )
 
         if memory_context:
             agent_messages.insert(
@@ -99,13 +170,11 @@ def create_knowledge_agent(
             context=runtime.context,
         )
 
-        result_messages = result.get(
-            "messages",
-            [],
-        )
-
         return {
-            "messages": result_messages,
+            "messages": result.get(
+                "messages",
+                [],
+            ),
             "current_agent": "knowledge_agent",
             "task_status": "completed",
         }
@@ -116,6 +185,13 @@ def create_knowledge_agent(
 def _build_memory_context(
     memories: list[str],
 ) -> str:
+    """
+    构造长期记忆上下文。
+
+    Long-term Memory 只是辅助上下文，
+    不能替代当前 RAG 检索结果。
+    """
+
     if not memories:
         return ""
 
@@ -129,6 +205,7 @@ def _build_memory_context(
         "for this workflow:\n"
         f"{memory_text}\n\n"
         "Use these memories only as contextual hints. "
-        "Do not treat them as authoritative facts when "
-        "they conflict with retrieved enterprise knowledge."
+        "For enterprise knowledge questions, use the "
+        "current enterprise knowledge base through "
+        "rag_search as the authoritative source."
     )

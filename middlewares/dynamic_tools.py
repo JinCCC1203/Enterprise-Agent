@@ -8,21 +8,37 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 
-from tools_manager.tool_exposure import PermissionBasedToolExposure
+from tools_manager.tool_exposure import (
+    PermissionBasedToolExposure,
+)
 
 
 class DynamicToolMiddleware(AgentMiddleware):
     """
-    在每次 Model Call 前，根据当前运行时用户角色，
-    动态决定哪些 Tool 可以暴露给模型。
+    在每次 Model Call 前，
+    根据当前 Runtime Role，
+    对当前 Specialist Scope 内的 Tool
+    做权限过滤。
     """
 
     def __init__(
         self,
+        *,
         tool_exposure: PermissionBasedToolExposure,
     ) -> None:
         super().__init__()
+
         self.tool_exposure = tool_exposure
+
+    def _get_exposed_tools(
+        self,
+        request: ModelRequest,
+    ):
+        role = request.runtime.context.user_role
+
+        return self.tool_exposure.expose(
+            role=role,
+        )
 
     def wrap_model_call(
         self,
@@ -33,9 +49,8 @@ class DynamicToolMiddleware(AgentMiddleware):
         ],
     ) -> ModelResponse:
 
-        context = request.runtime.context
-        exposed_tools = self.tool_exposure.expose(
-            role=context.user_role,
+        exposed_tools = self._get_exposed_tools(
+            request
         )
 
         new_request = request.override(
@@ -50,10 +65,8 @@ class DynamicToolMiddleware(AgentMiddleware):
         handler,
     ) -> ModelResponse:
 
-        context = request.runtime.context
-
-        exposed_tools = self.tool_exposure.expose(
-            role=context.user_role,
+        exposed_tools = self._get_exposed_tools(
+            request
         )
 
         new_request = request.override(
