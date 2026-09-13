@@ -55,16 +55,32 @@ class EnterpriseAgentState(TypedDict, total=False):
 
     不放在 State 中，而由 EnterpriseAgentContext 提供。
 
-    State 后续用于支撑：
+    State 用于支撑：
+
+        - Conversation
         - Long-term Memory
         - Supervisor
         - Specialist Agents
         - Handoff
         - Tool Execution
         - HITL
-        - Retry / Recovery
+        - Error Handling
+        - Workflow Recovery
+        - Re-route
         - Parallel Execution
         - Checkpoint / Resume
+
+    设计原则：
+
+        Middleware 内部的 Tool / Model Retry Attempt
+        不直接作为 Graph State。
+
+        RetryMiddleware / ToolErrorMiddleware
+        负责执行级 Retry 与错误处理；
+
+        EnterpriseAgentState
+        负责跨 Node / Agent / Checkpoint
+        需要共享和持久化的 Workflow 状态。
     """
 
     # ==============================================================
@@ -75,76 +91,139 @@ class EnterpriseAgentState(TypedDict, total=False):
 
     # ==============================================================
     # Long-term Memory
-    #
-    # Memory Retrieve Node 在 Workflow 开始阶段写入。
-    # 后续整个 Workflow 共享。
-    #
-    # 当前使用字符串表示，后续可以根据实际需要扩展为
-    # 更结构化的 Memory 对象。
     # ==============================================================
 
+    # Memory Retrieval Node 在 Workflow 开始阶段写入。
     retrieved_memories: list[str]
+
+    # Memory Persistence Node 写入。
+    #
+    # operation:
+    #   add
+    #   update
+    #   ignore
+    #   error
+    #
+    memory_persisted: bool
+    memory_operation: str | None
+    memory_persist_reason: str | None
 
     # ==============================================================
     # Agent / Workflow State
     # ==============================================================
 
+    # 当前正在执行的 Specialist Agent。
     current_agent: str | None
 
+    # Supervisor / Recovery 提供的下一步 Agent。
     next_agent: str | None
 
+    # 当前 Workflow 状态。
+    #
+    # 推荐值：
+    #   running
+    #   completed
+    #   failed
+    #   interrupted
     task_status: str
 
     # ==============================================================
     # Routing / Handoff
-    #
-    # Supervisor 决定下一步 Agent 时使用。
     # ==============================================================
 
+    # Supervisor / Handoff 的原因。
     handoff_reason: str | None
 
     # ==============================================================
     # Tool / Execution State
-    #
-    # 后续用于：
-    # - Tool Result Aggregation
-    # - Multi-step Execution
-    # - Parallel Execution
-    # - Specialist Collaboration
     # ==============================================================
 
+    # 用于跨 Node 聚合 Tool 结果。
+    #
+    # Tool 本身的 retry attempt
+    # 不在这里维护。
     tool_results: list[Any]
 
     # ==============================================================
     # Human-in-the-Loop
-    #
-    # 后续用于：
-    # - RiskPolicy
-    # - HITL
-    # - Approval / Reject / Edit
     # ==============================================================
 
+    # 当前 Workflow 是否需要人工审批。
     approval_required: bool
 
+    # 当前审批状态。
+    #
+    # 推荐值：
+    #   pending
+    #   approved
+    #   rejected
+    #   edited
     approval_status: str | None
 
     # ==============================================================
     # Error / Recovery State
-    #
-    # 后续用于：
-    # - Tool Error
-    # - Retry
-    # - Recovery
-    # - Re-route
-    # - Human Escalation
     # ==============================================================
 
+    # 当前 Workflow 最近一次结构化错误。
+    #
+    # ToolErrorMiddleware / Agent Runtime
+    # 可以将最终失败转换为该字段。
     error: str | None
 
-    retry_count: int
+    # --------------------------------------------------------------
+    # Failure Context
+    # --------------------------------------------------------------
+
+    # 最近一次发生错误的 Graph Node。
+    last_failed_node: str | None
+
+    # 最近一次失败的 Tool。
+    #
+    # 如果失败发生在 Agent Node 本身而非 Tool，
+    # 则可以为 None。
+    last_failed_tool: str | None
+
+    # --------------------------------------------------------------
+    # Workflow-level Recovery
+    # --------------------------------------------------------------
+
+    # 整个 Workflow 已经执行了多少次 Recovery。
+    #
+    # 注意：
+    #
+    #   recovery_attempts
+    #       != Tool Retry Count
+    #
+    # Tool / Model Retry 由 Middleware 内部负责，
+    # 不与 Workflow Recovery 共用计数。
+    recovery_attempts: int
+
+    # Recovery Node 决定采取的恢复策略。
+    #
+    # 当前支持：
+    #   retry
+    #   reroute
+    #   human_review
+    #   failed
+    #   recovered
+    recovery_status: str | None
+
+    # Recovery 决策原因。
+    #
+    # 用于：
+    #   - Logging
+    #   - Audit
+    #   - Debugging
+    #   - Recovery Analysis
+    recovery_reason: str | None
+
+    # 是否需要通过 HITL / Checkpoint Resume
+    # 恢复当前 Workflow。
+    resume_required: bool
 
     # ==============================================================
     # Final Output
     # ==============================================================
 
+    # 当前 Workflow 最终生成的回答。
     final_answer: str | None

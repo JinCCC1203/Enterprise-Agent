@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.runtime import Runtime
@@ -18,7 +19,9 @@ from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
-from langchain_core.runnables import RunnableConfig
+from workflow.utils.execution_errors import (
+    extract_tool_execution_error,
+)
 
 
 TICKET_TOOL_SCOPE = frozenset(
@@ -51,71 +54,54 @@ def create_ticket_agent(
         - 创建工单
         - 更新工单
         - 工单生命周期处理
-
-    注意：
-
-        Agent 不直接执行 RiskPolicy。
-
-        具体 Tool Call：
-
-            LLM
-             ↓
-            Tool Call
-             ↓
-            RiskPolicy
-             ↓
-            HITL / Execute
     """
 
-    # ------------------------------------------------------------------
-    # 1. Ticket Registry View
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 1. Specialist Registry View
+    # ==============================================================
 
     registry_view = registry.create_view(
         TICKET_TOOL_SCOPE
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 2. Tool Exposure
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     tool_exposure = PermissionBasedToolExposure(
         registry_view=registry_view,
         permission_policy=permission_policy,
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 3. Dynamic Tool Middleware
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     dynamic_tools = DynamicToolMiddleware(
         tool_exposure=tool_exposure,
         agent_name="ticket_agent",
     )
 
-    # ------------------------------------------------------------------
-    # 4. Middleware
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 4. Middleware Assembly
+    # ==============================================================
 
-    agent_middleware = list(
-        middleware or []
-    )
+    agent_middleware = [
+        dynamic_tools,
+        *(middleware or []),
+    ]
 
-    agent_middleware.append(
-        dynamic_tools
-    )
-
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 5. Scoped Tools
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     tools: list[BaseTool] = (
         registry_view.get_all_tools()
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 6. LangChain Agent
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     agent = create_agent(
         model=model,
@@ -124,9 +110,9 @@ def create_ticket_agent(
         context_schema=EnterpriseAgentContext,
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 7. LangGraph Node
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     async def ticket_agent_node(
         state: EnterpriseAgentState,
@@ -171,11 +157,34 @@ def create_ticket_agent(
             context=runtime.context,
         )
 
+        result_messages = result.get(
+            "messages",
+            [],
+        )
+
+        # 只检查当前 invocation 新增的消息。
+        new_messages = result_messages[
+            len(agent_messages):
+        ]
+
+        failure = extract_tool_execution_error(
+            new_messages
+        )
+
+        if failure is not None:
+            return {
+                "messages": result_messages,
+                "current_agent": "ticket_agent",
+                "task_status": "failed",
+                "error": failure["error"],
+                "last_failed_node": "ticket_agent",
+                "last_failed_tool": (
+                    failure["last_failed_tool"]
+                ),
+            }
+
         return {
-            "messages": result.get(
-                "messages",
-                [],
-            ),
+            "messages": result_messages,
             "current_agent": "ticket_agent",
             "task_status": "completed",
         }
@@ -189,14 +198,15 @@ def _build_memory_context(
     """
     构造长期记忆上下文。
 
-    Memory 只能作为历史上下文。
-    对当前 Ticket 状态：
+    Memory 只提供历史背景。
+
+    当前 Ticket 状态：
         get_ticket
     是权威来源。
 
     对 create/update：
-        必须根据当前任务和工具结果决定，
-        不能仅凭 Memory 自动执行写操作。
+        必须依据当前任务以及 Tool Result，
+        不能只根据历史 Memory 执行写操作。
     """
 
     if not memories:

@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.runtime import Runtime
@@ -18,7 +19,9 @@ from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
-from langchain_core.runnables import RunnableConfig
+from workflow.utils.execution_errors import (
+    extract_tool_execution_error,
+)
 
 
 KNOWLEDGE_TOOL_SCOPE = frozenset(
@@ -51,72 +54,73 @@ def create_knowledge_agent(
 
         Global ToolRegistry
                 ↓
-        Knowledge ToolRegistryView
+        ToolRegistryView
                 ↓
-            rag_search
+        Specialist Scope
                 ↓
         PermissionPolicy
                 ↓
         DynamicToolMiddleware
                 ↓
         LLM Tool Calling
+                ↓
+        RiskPolicy / HITL
+                ↓
+        Tool Retry
+                ↓
+        Tool Error
+                ↓
+        Workflow Recovery
     """
 
-    # ------------------------------------------------------------------
-    # 1. 创建 Knowledge Specialist 的受限 Registry View
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 1. Specialist Registry View
+    # ==============================================================
 
     registry_view = registry.create_view(
         KNOWLEDGE_TOOL_SCOPE
     )
 
-    # ------------------------------------------------------------------
-    # 2. 创建 Tool Exposure
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 2. Tool Exposure
+    # ==============================================================
 
     tool_exposure = PermissionBasedToolExposure(
         registry_view=registry_view,
         permission_policy=permission_policy,
     )
 
-    # ------------------------------------------------------------------
-    # 3. 创建 Dynamic Tool Middleware
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 3. Dynamic Tool Middleware
+    #
+    # Specialist-specific middleware，放在当前 Agent middleware 最前面。
+    # ==============================================================
 
     dynamic_tools = DynamicToolMiddleware(
         tool_exposure=tool_exposure,
         agent_name="knowledge_agent",
     )
 
-    # ------------------------------------------------------------------
-    # 4. 组装 Middleware
-    #
-    # 注意：
-    # middleware 参数中不要再次放入旧的
-    # DynamicToolMiddleware。
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 4. Middleware Assembly
+    # ==============================================================
 
-    agent_middleware = list(
-        middleware or []
-    )
+    agent_middleware = [
+        dynamic_tools,
+        *(middleware or []),
+    ]
 
-    agent_middleware.append(
-        dynamic_tools
-    )
-
-    # ------------------------------------------------------------------
-    # 5. Specialist Agent 初始 Tool 集合
-    #
-    # 这里使用 Registry View，而不是 Global Registry。
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 5. Scoped Tools
+    # ==============================================================
 
     tools: list[BaseTool] = (
         registry_view.get_all_tools()
     )
 
-    # ------------------------------------------------------------------
-    # 6. 创建 LangChain Agent
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 6. LangChain Agent
+    # ==============================================================
 
     agent = create_agent(
         model=model,
@@ -125,9 +129,9 @@ def create_knowledge_agent(
         context_schema=EnterpriseAgentContext,
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 7. LangGraph Node
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     async def knowledge_agent_node(
         state: EnterpriseAgentState,
@@ -164,6 +168,10 @@ def create_knowledge_agent(
                 ),
             )
 
+        # ----------------------------------------------------------
+        # Agent Runtime
+        # ----------------------------------------------------------
+
         result = await agent.ainvoke(
             {
                 "messages": agent_messages,
@@ -172,11 +180,44 @@ def create_knowledge_agent(
             context=runtime.context,
         )
 
+        result_messages = result.get(
+            "messages",
+            [],
+        )
+
+        # ----------------------------------------------------------
+        # 只检查本次 Agent Invocation 新产生的消息
+        #
+        # 防止 Recovery retry 时，
+        # 上一轮失败留下的 ToolMessage 污染当前结果。
+        # ----------------------------------------------------------
+
+        new_messages = result_messages[
+            len(agent_messages):
+        ]
+
+        failure = extract_tool_execution_error(
+            new_messages
+        )
+
+        if failure is not None:
+            return {
+                "messages": result_messages,
+                "current_agent": "knowledge_agent",
+                "task_status": "failed",
+                "error": failure["error"],
+                "last_failed_node": "knowledge_agent",
+                "last_failed_tool": (
+                    failure["last_failed_tool"]
+                ),
+            }
+
+        # ----------------------------------------------------------
+        # Normal Completion
+        # ----------------------------------------------------------
+
         return {
-            "messages": result.get(
-                "messages",
-                [],
-            ),
+            "messages": result_messages,
             "current_agent": "knowledge_agent",
             "task_status": "completed",
         }

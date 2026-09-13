@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.runtime import Runtime
@@ -18,7 +19,10 @@ from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
 )
-from langchain_core.runnables import RunnableConfig
+from workflow.utils.execution_errors import (
+    extract_tool_execution_error,
+)
+
 
 RESEARCH_TOOL_SCOPE = frozenset(
     {
@@ -38,10 +42,9 @@ def create_research_agent(
     创建 Research / Web Specialist Agent。
 
     Specialist Scope:
-
         web_search
 
-    web_search 是通过 MCP 接入的外部搜索工具：
+    web_search 通过 MCP 接入：
 
         Research Agent
               ↓
@@ -53,75 +56,55 @@ def create_research_agent(
               ↓
         External Search Provider
               ↓
-          Internet
-
-    Research Agent 的职责：
-
-        - 外部公开信息检索
-        - 实时信息查询
-        - 技术资料研究
-        - 官方文档搜索
-        - 新闻 / 外部知识研究
-
-    注意：
-        Research Agent 本身不实现 HTTP 搜索逻辑。
-        搜索能力完全由 MCP web_search Tool 提供。
+           Internet
     """
 
-    # ------------------------------------------------------------------
-    # 1. Research Registry View
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 1. Specialist Registry View
+    # ==============================================================
 
     registry_view = registry.create_view(
         RESEARCH_TOOL_SCOPE
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 2. Tool Exposure
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     tool_exposure = PermissionBasedToolExposure(
         registry_view=registry_view,
         permission_policy=permission_policy,
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 3. Dynamic Tool Middleware
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     dynamic_tools = DynamicToolMiddleware(
         tool_exposure=tool_exposure,
         agent_name="research_agent",
     )
 
-    # ------------------------------------------------------------------
-    # 4. Middleware
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 4. Middleware Assembly
+    # ==============================================================
 
-    agent_middleware = list(
-        middleware or []
-    )
+    agent_middleware = [
+        dynamic_tools,
+        *(middleware or []),
+    ]
 
-    agent_middleware.append(
-        dynamic_tools
-    )
-
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 5. Scoped Tools
-    #
-    # Registry 中的 web_search 必须已经被 MCP Client
-    # list_tools() 发现并注册。
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     tools: list[BaseTool] = (
         registry_view.get_all_tools()
     )
 
-    # ------------------------------------------------------------------
-    # 6. 明确验证 web_search 已注册
-    #
-    # 因为 Research Agent 的核心依赖就是 web_search。
-    # ------------------------------------------------------------------
+    # ==============================================================
+    # 6. Validate web_search
+    # ==============================================================
 
     if not registry_view.contains(
         "web_search"
@@ -132,9 +115,9 @@ def create_research_agent(
             "available in the ToolRegistry."
         )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 7. LangChain Agent
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     agent = create_agent(
         model=model,
@@ -143,9 +126,9 @@ def create_research_agent(
         context_schema=EnterpriseAgentContext,
     )
 
-    # ------------------------------------------------------------------
+    # ==============================================================
     # 8. LangGraph Node
-    # ------------------------------------------------------------------
+    # ==============================================================
 
     async def research_agent_node(
         state: EnterpriseAgentState,
@@ -190,11 +173,34 @@ def create_research_agent(
             context=runtime.context,
         )
 
+        result_messages = result.get(
+            "messages",
+            [],
+        )
+
+        # 只检查当前 invocation 新增的消息。
+        new_messages = result_messages[
+            len(agent_messages):
+        ]
+
+        failure = extract_tool_execution_error(
+            new_messages
+        )
+
+        if failure is not None:
+            return {
+                "messages": result_messages,
+                "current_agent": "research_agent",
+                "task_status": "failed",
+                "error": failure["error"],
+                "last_failed_node": "research_agent",
+                "last_failed_tool": (
+                    failure["last_failed_tool"]
+                ),
+            }
+
         return {
-            "messages": result.get(
-                "messages",
-                [],
-            ),
+            "messages": result_messages,
             "current_agent": "research_agent",
             "task_status": "completed",
         }
@@ -208,13 +214,11 @@ def _build_memory_context(
     """
     构造长期记忆上下文。
 
-    对 Research Agent：
+    Memory：
+        历史上下文。
 
-        Memory
-          = 历史上下文
-
-        web_search
-          = 当前外部事实的主要来源
+    web_search：
+        当前外部、实时信息的主要来源。
     """
 
     if not memories:

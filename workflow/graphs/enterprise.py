@@ -10,14 +10,24 @@ from memories.long_memory.manager import MemoryManager
 from policies.permission import PermissionPolicy
 from tools_manager.registry import ToolRegistry
 
+from workflow.nodes.human_review import (
+    create_human_review_node,
+)
 from workflow.nodes.knowledge_agent import (
     create_knowledge_agent,
 )
 from workflow.nodes.memory import (
     create_memory_retrieval_node,
 )
+from workflow.nodes.memory_persist import (
+    create_memory_persist_node,
+)
 from workflow.nodes.operations_agent import (
     create_operations_agent,
+)
+from workflow.nodes.recovery import (
+    RecoveryPolicy,
+    create_recovery_node,
 )
 from workflow.nodes.research_agent import (
     create_research_agent,
@@ -27,6 +37,12 @@ from workflow.nodes.supervisor import (
 )
 from workflow.nodes.ticket_agent import (
     create_ticket_agent,
+)
+from workflow.routing.human_review_router import (
+    human_review_router,
+)
+from workflow.routing.recovery_router import (
+    recovery_router,
 )
 from workflow.routing.supervisor_router import (
     supervisor_router,
@@ -38,18 +54,20 @@ from workflow.state import (
 
 
 def build_enterprise_graph(
-        *,
-        model: ChatOpenAI,
-        registry: ToolRegistry,
-        permission_policy: PermissionPolicy,
-        middleware: list[Any] | None = None,
-        memory_manager: MemoryManager | None = None,
-        checkpointer: AsyncPostgresSaver | None = None,
+    *,
+    model: ChatOpenAI,
+    registry: ToolRegistry,
+    permission_policy: PermissionPolicy,
+    middleware: list[Any] | None = None,
+    memory_manager: MemoryManager | None = None,
+    checkpointer: AsyncPostgresSaver | None = None,
 ):
     """
     构建 Enterprise Multi-Agent Workflow。
 
-    当前流程：
+    ==============================================================
+    主流程
+    ==============================================================
 
         START
           ↓
@@ -61,10 +79,59 @@ def build_enterprise_graph(
           ├── Knowledge Agent
           ├── Operations Agent
           ├── Ticket Agent
-          ├── Research Agent
-          └── END
+          └── Research Agent
 
-    Specialist Agent 内部：
+    ==============================================================
+    Specialist 成功
+    ==============================================================
+
+        Specialist
+            ↓
+        Memory Persist
+            ↓
+           END
+
+    ==============================================================
+    Specialist 最终失败
+    ==============================================================
+
+        Specialist
+            ↓
+         Recovery
+          ├── retry
+          │     ↓
+          │   原 Specialist
+          │
+          ├── reroute
+          │     ↓
+          │   Supervisor
+          │     ↓
+          │   LLM 重新规划
+          │
+          ├── human_review
+          │     ↓
+          │   Human Review
+          │     ↓
+          │   interrupt()
+          │     ↓
+          │   Checkpoint
+          │     ↓
+          │   Command(resume)
+          │     ↓
+          │   Human Review Router
+          │     ├── retry
+          │     ├── reroute
+          │     └── reject
+          │
+          └── failed
+                ↓
+          Memory Persist
+                ↓
+               END
+
+    ==============================================================
+    Specialist Agent 内部
+    ==============================================================
 
         Global ToolRegistry
               ↓
@@ -78,33 +145,55 @@ def build_enterprise_graph(
               ↓
         LLM Tool Calling
               ↓
-        RiskPolicy / HITL
+        RiskPolicy / Tool-level HITL
               ↓
-        Tool Execution
+        Tool Retry
+              ↓
+        Tool Error
+              ↓
+        Specialist Node
+              ↓
+        EnterpriseAgentState
 
-    LangGraph Persistence：
+    ==============================================================
+    Persistence
+    ==============================================================
 
         Graph State
               ↓
         PostgreSQL Checkpointer
               ↓
-        Checkpoint / HITL Resume / Recovery
+        Checkpoint / Interrupt / Resume / Recovery
     """
+
+    # ==============================================================
+    # 1. StateGraph
+    # ==============================================================
 
     graph = StateGraph(
         EnterpriseAgentState,
         context_schema=EnterpriseAgentContext,
     )
 
+    # ==============================================================
+    # 2. Shared Middleware
+    #
+    # DynamicToolMiddleware 不放这里。
+    #
+    # 每个 Specialist 根据自己的 ToolRegistryView
+    # 创建自己的 DynamicToolMiddleware。
+    # ==============================================================
+
     shared_middleware = list(
         middleware or []
     )
 
     # ==============================================================
-    # 1. Memory Retrieval
+    # 3. Memory Retrieval
     # ==============================================================
 
     if memory_manager is not None:
+
         memory_retrieval_node = (
             create_memory_retrieval_node(
                 memory_manager=memory_manager,
@@ -118,7 +207,7 @@ def build_enterprise_graph(
         )
 
     # ==============================================================
-    # 2. Supervisor
+    # 4. Supervisor
     # ==============================================================
 
     supervisor_node = create_supervisor_node(
@@ -131,7 +220,7 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 3. Knowledge Agent
+    # 5. Knowledge Agent
     # ==============================================================
 
     knowledge_agent_node = create_knowledge_agent(
@@ -147,7 +236,7 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 4. Operations Agent
+    # 6. Operations Agent
     # ==============================================================
 
     operations_agent_node = create_operations_agent(
@@ -163,7 +252,7 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 5. Ticket Agent
+    # 7. Ticket Agent
     # ==============================================================
 
     ticket_agent_node = create_ticket_agent(
@@ -179,7 +268,7 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 6. Research Agent
+    # 8. Research Agent
     # ==============================================================
 
     research_agent_node = create_research_agent(
@@ -195,7 +284,64 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 7. START
+    # 9. Memory Persistence
+    # ==============================================================
+
+    if memory_manager is not None:
+
+        memory_persist_node = (
+            create_memory_persist_node(
+                memory_manager=memory_manager,
+            )
+        )
+
+        graph.add_node(
+            "memory_persist",
+            memory_persist_node,
+        )
+
+    # ==============================================================
+    # 10. Recovery
+    # ==============================================================
+
+    recovery_policy = RecoveryPolicy(
+        max_recovery_attempts=2,
+    )
+
+    recovery_node = create_recovery_node(
+        recovery_policy=recovery_policy,
+    )
+
+    graph.add_node(
+        "recovery",
+        recovery_node,
+    )
+
+    # ==============================================================
+    # 11. Workflow-level Human Review
+    #
+    # 注意：
+    #
+    # 这不是 HumanInTheLoopMiddleware。
+    #
+    # Middleware：
+    #     Tool-level HITL
+    #
+    # human_review：
+    #     Workflow-level Recovery HITL
+    # ==============================================================
+
+    human_review_node = (
+        create_human_review_node()
+    )
+
+    graph.add_node(
+        "human_review",
+        human_review_node,
+    )
+
+    # ==============================================================
+    # 12. START
     # ==============================================================
 
     if memory_manager is not None:
@@ -218,7 +364,7 @@ def build_enterprise_graph(
         )
 
     # ==============================================================
-    # 8. Supervisor → Conditional Routing
+    # 13. Supervisor → Specialist
     # ==============================================================
 
     graph.add_conditional_edges(
@@ -234,43 +380,137 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 9. Specialist → END
+    # 14. Specialist Outcome Router
     #
-    # 当前阶段：
-    # Specialist 完成后结束 Workflow。
+    # completed:
+    #     → Memory Persist / END
     #
-    # 后续：
-    #   Recovery
-    #   Re-route
-    #   Handoff
-    #   Memory Persistence
-    #   Parallel Execution
+    # failed:
+    #     → Recovery
     # ==============================================================
 
-    graph.add_edge(
+    def specialist_outcome_router(
+        state: EnterpriseAgentState,
+    ) -> str:
+
+        task_status = state.get(
+            "task_status"
+        )
+
+        if task_status == "failed":
+            return "recovery"
+
+        if memory_manager is not None:
+            return "memory_persist"
+
+        return "end"
+
+    specialist_routes = {
+        "recovery": "recovery",
+        "memory_persist": "memory_persist",
+        "end": END,
+    }
+
+    # ==============================================================
+    # 15. Specialist → Success / Recovery
+    # ==============================================================
+
+    for specialist_name in (
         "knowledge_agent",
-        END,
-    )
-
-    graph.add_edge(
         "operations_agent",
-        END,
-    )
-
-    graph.add_edge(
         "ticket_agent",
-        END,
-    )
-
-    graph.add_edge(
         "research_agent",
-        END,
+    ):
+        graph.add_conditional_edges(
+            specialist_name,
+            specialist_outcome_router,
+            specialist_routes,
+        )
+
+    # ==============================================================
+    # 16. Recovery Router
+    #
+    # retry:
+    #     → 原 Specialist
+    #
+    # reroute:
+    #     → Supervisor
+    #
+    # human_review:
+    #     → Human Review Node
+    #
+    # failed:
+    #     → Memory Persist
+    # ==============================================================
+
+    recovery_routes: dict[str, str] = {
+        "knowledge_agent": "knowledge_agent",
+        "operations_agent": "operations_agent",
+        "ticket_agent": "ticket_agent",
+        "research_agent": "research_agent",
+        "supervisor": "supervisor",
+        "human_review": "human_review",
+        "memory_persist": "memory_persist",
+    }
+
+    # 如果 memory_manager=None，
+    # 当前测试模式没有 Memory Persist。
+    if memory_manager is None:
+        recovery_routes.pop(
+            "memory_persist"
+        )
+
+    graph.add_conditional_edges(
+        "recovery",
+        recovery_router,
+        recovery_routes,
     )
 
     # ==============================================================
-    # 10. Compile
+    # 17. Human Review Router
     #
-    # checkpointer 非空时启用 LangGraph PostgreSQL Persistence。
+    # human_retry:
+    #     → 原 Specialist
+    #
+    # human_reroute:
+    #     → Supervisor
+    #
+    # human_rejected:
+    #     → Memory Persist
+    # ==============================================================
+
+    human_review_routes: dict[str, str] = {
+        "knowledge_agent": "knowledge_agent",
+        "operations_agent": "operations_agent",
+        "ticket_agent": "ticket_agent",
+        "research_agent": "research_agent",
+        "supervisor": "supervisor",
+    }
+
+    if memory_manager is not None:
+        human_review_routes[
+            "memory_persist"
+        ] = "memory_persist"
+
+    graph.add_conditional_edges(
+        "human_review",
+        human_review_router,
+        human_review_routes,
+    )
+
+    # ==============================================================
+    # 18. Memory Persist → END
+    # ==============================================================
+
+    if memory_manager is not None:
+
+        graph.add_edge(
+            "memory_persist",
+            END,
+        )
+
+    # ==============================================================
+    # 19. Compile
     # ==============================================================
 
     return graph.compile(
