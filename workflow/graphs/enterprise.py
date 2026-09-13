@@ -48,6 +48,9 @@ from workflow.routing.human_review_router import (
 from workflow.routing.recovery_router import (
     recovery_router,
 )
+from workflow.routing.specialist_router import (
+    specialist_router,
+)
 from workflow.routing.supervisor_router import (
     supervisor_router,
 )
@@ -57,6 +60,174 @@ from workflow.state import (
     EnterpriseAgentState,
 )
 
+
+# ==============================================================
+# Specialist Names
+# ==============================================================
+
+SPECIALIST_NAMES = (
+    "knowledge_agent",
+    "operations_agent",
+    "ticket_agent",
+    "research_agent",
+)
+
+
+# ==============================================================
+# Specialist Node Wrapper
+# ==============================================================
+
+def _wrap_specialist_node(
+    specialist_name: str,
+    node: Any,
+):
+    """
+    包装 Specialist Node。
+
+    目的：
+
+        Specialist 成功执行后，
+        将其记录到：
+
+            state["completed_agents"]
+
+    这样下一次 Supervisor 执行时，
+    就能知道哪些 Specialist 已经完成。
+
+    注意：
+
+        - task_status == completed：
+              才加入 completed_agents
+
+        - task_status == failed：
+              不加入 completed_agents
+
+        - GraphInterrupt：
+              直接向上抛出，不修改状态
+
+    Specialist 本身仍然负责：
+        - Tool Calling
+        - Tool HITL
+        - Tool Retry
+        - Tool Error
+        - Specialist-level Failure
+
+    Wrapper 只负责 Workflow bookkeeping。
+    """
+
+    async def wrapped_node(
+        state: EnterpriseAgentState,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+
+        # ----------------------------------------------------------
+        # 执行原始 Specialist Node
+        # ----------------------------------------------------------
+
+        result = await node(
+            state,
+            *args,
+            **kwargs,
+        )
+
+        if not isinstance(
+            result,
+            dict,
+        ):
+            return result
+
+        # ----------------------------------------------------------
+        # Specialist 执行状态
+        # ----------------------------------------------------------
+
+        task_status = result.get(
+            "task_status",
+            state.get(
+                "task_status",
+                "running",
+            ),
+        )
+
+        # ----------------------------------------------------------
+        # Specialist 成功
+        # ----------------------------------------------------------
+
+        if task_status == "completed":
+
+            completed_agents = list(
+                state.get(
+                    "completed_agents",
+                    [],
+                )
+            )
+
+            # 当前 Specialist 名称优先使用 wrapper
+            # 的固定名称，而不是依赖 Specialist Node
+            # 是否正确写入 current_agent。
+            if (
+                specialist_name
+                not in completed_agents
+            ):
+                completed_agents.append(
+                    specialist_name
+                )
+
+            result["completed_agents"] = (
+                completed_agents
+            )
+
+        return result
+
+    return wrapped_node
+
+
+# ==============================================================
+# Workflow Completion Router
+# ==============================================================
+
+def _workflow_completion_router(
+    state: EnterpriseAgentState,
+) -> str:
+    """
+    Workflow 完成后的最终路由。
+
+    这里已经确认：
+
+        workflow_complete == True
+
+    因此只需要决定：
+
+        memory_persist
+            或
+        finalizer
+    """
+
+    if state.get(
+        "workflow_complete",
+        False,
+    ) is not True:
+        # Defensive fallback。
+        #
+        # 正常情况下这里不会被调用，
+        # 因为 specialist_router 只有在
+        # workflow_complete=True 时才返回 completed。
+        return "finalizer"
+
+    memory_enabled = state.get(
+        "_memory_enabled",
+        False,
+    )
+
+    if memory_enabled:
+        return "memory_persist"
+
+    return "finalizer"
+
+
+# ==============================================================
+# Build Enterprise Graph
+# ==============================================================
 
 def build_enterprise_graph(
     *,
@@ -71,7 +242,7 @@ def build_enterprise_graph(
     构建 Enterprise Multi-Agent Workflow。
 
     ==============================================================
-    主流程
+    Overall Workflow
     ==============================================================
 
         START
@@ -80,64 +251,97 @@ def build_enterprise_graph(
           ↓
         Supervisor
           ↓
-        Conditional Routing
-          ├── Knowledge Agent
-          ├── Operations Agent
-          ├── Ticket Agent
-          └── Research Agent
-
-    ==============================================================
-    Specialist 成功
-    ==============================================================
-
         Specialist
+          ↓
+        Specialist Outcome Router
+          │
+          ├── failed
+          │      ↓
+          │   Recovery
+          │
+          ├── completed
+          │      ↓
+          │   Supervisor
+          │
+          └── workflow_complete
+                 ↓
+          Memory Persist
+                 ↓
+             Finalizer
+                 ↓
+                END
+
+    ==============================================================
+    Multi-Specialist Flow
+    ==============================================================
+
+        Supervisor
+             ↓
+        operations_agent
+             ↓
+        Supervisor
+             ↓
+        ticket_agent
+             ↓
+        Supervisor
+             ↓
+        Finalizer
+
+    例如：
+
+        "查询 payment-service 当前健康状态，
+         如果异常，请创建一个 P1 Incident 工单。"
+
+    可能形成：
+
+        Supervisor
             ↓
-        Memory Persist
+        operations_agent
+            ↓
+        get_service_health
+            ↓
+        Supervisor
+            ↓
+        ticket_agent
+            ↓
+        create_ticket
+            ↓
+        HITL
+            ↓
+        Supervisor
             ↓
         Finalizer
-            ↓
-           END
-
-    如果 memory_manager=None：
-
-        Specialist
-            ↓
-        Finalizer
-            ↓
-           END
 
     ==============================================================
-    Specialist 最终失败
+    Recovery
     ==============================================================
 
         Specialist
             ↓
          Recovery
           ├── retry
-          │     ↓
+          │      ↓
           │   原 Specialist
           │
           ├── reroute
-          │     ↓
+          │      ↓
           │   Supervisor
           │
           ├── human_review
-          │     ↓
+          │      ↓
           │   Human Review
-          │     ↓
+          │      ↓
           │   interrupt()
-          │     ↓
-          │   Checkpoint
-          │     ↓
+          │      ↓
           │   Command(resume)
           │
           └── failed
-                ↓
+                 ↓
           Memory Persist
-                ↓
+                 ↓
              Finalizer
-                ↓
-               END
+                 ↓
+                END
 
     ==============================================================
     Finalization
@@ -213,7 +417,10 @@ def build_enterprise_graph(
 
     graph.add_node(
         "knowledge_agent",
-        knowledge_agent_node,
+        _wrap_specialist_node(
+            specialist_name="knowledge_agent",
+            node=knowledge_agent_node,
+        ),
     )
 
     # ==============================================================
@@ -229,7 +436,10 @@ def build_enterprise_graph(
 
     graph.add_node(
         "operations_agent",
-        operations_agent_node,
+        _wrap_specialist_node(
+            specialist_name="operations_agent",
+            node=operations_agent_node,
+        ),
     )
 
     # ==============================================================
@@ -245,7 +455,10 @@ def build_enterprise_graph(
 
     graph.add_node(
         "ticket_agent",
-        ticket_agent_node,
+        _wrap_specialist_node(
+            specialist_name="ticket_agent",
+            node=ticket_agent_node,
+        ),
     )
 
     # ==============================================================
@@ -261,7 +474,10 @@ def build_enterprise_graph(
 
     graph.add_node(
         "research_agent",
-        research_agent_node,
+        _wrap_specialist_node(
+            specialist_name="research_agent",
+            node=research_agent_node,
+        ),
     )
 
     # ==============================================================
@@ -325,7 +541,45 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 13. START
+    # 13. Specialist Completed Intermediate Node
+    #
+    # Specialist Router 返回：
+    #
+    #     completed
+    #
+    # 但 completed 之后还要根据：
+    #
+    #     workflow_complete
+    #
+    # 决定：
+    #
+    #     Memory Persist
+    #     或
+    #     Finalizer
+    #
+    # 所以这里增加一个很轻量的中间节点。
+    # ==============================================================
+
+    async def specialist_completed_node(
+        state: EnterpriseAgentState,
+    ) -> dict[str, Any]:
+        """
+        Specialist 已经成功，并且 Supervisor
+        已经判断整个 Workflow 完成。
+
+        该节点不修改业务 State，
+        仅用于把 Graph 中的两个路由阶段分开。
+        """
+
+        return {}
+
+    graph.add_node(
+        "specialist_completed",
+        specialist_completed_node,
+    )
+
+    # ==============================================================
+    # 14. START
     # ==============================================================
 
     if memory_manager is not None:
@@ -348,7 +602,20 @@ def build_enterprise_graph(
         )
 
     # ==============================================================
-    # 14. Supervisor → Specialist / Finalizer
+    # 15. Supervisor
+    #
+    # Supervisor 根据：
+    #
+    #     user query
+    #     completed_agents
+    #     tool_results
+    #     current_agent
+    #     workflow state
+    #
+    # 决定：
+    #
+    #     specialist
+    #     end
     # ==============================================================
 
     graph.add_conditional_edges(
@@ -364,58 +631,59 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 15. Specialist Outcome Router
+    # 16. Specialist Outcome
     #
-    # failed:
-    #     → Recovery
+    # specialist_router:
     #
-    # completed + memory:
-    #     → Memory Persist
+    #     failed
+    #         → recovery
     #
-    # completed + no memory:
-    #     → Finalizer
+    #     completed +
+    #     workflow_complete=False
+    #         → supervisor
+    #
+    #     completed +
+    #     workflow_complete=True
+    #         → specialist_completed
     # ==============================================================
-
-    def specialist_outcome_router(
-        state: EnterpriseAgentState,
-    ) -> str:
-
-        task_status = state.get(
-            "task_status"
-        )
-
-        if task_status == "failed":
-            return "recovery"
-
-        if memory_manager is not None:
-            return "memory_persist"
-
-        return "finalizer"
 
     specialist_routes = {
         "recovery": "recovery",
-        "memory_persist": "memory_persist",
-        "finalizer": "finalizer",
+        "supervisor": "supervisor",
+        "completed": "specialist_completed",
     }
 
-    # ==============================================================
-    # 16. Specialist → Success / Recovery
-    # ==============================================================
+    for specialist_name in SPECIALIST_NAMES:
 
-    for specialist_name in (
-        "knowledge_agent",
-        "operations_agent",
-        "ticket_agent",
-        "research_agent",
-    ):
         graph.add_conditional_edges(
             specialist_name,
-            specialist_outcome_router,
+            specialist_router,
             specialist_routes,
         )
 
     # ==============================================================
-    # 17. Recovery Router
+    # 17. Specialist Completed
+    #
+    # 这里决定：
+    #
+    #     Memory Persist
+    #          或
+    #     Finalizer
+    # ==============================================================
+
+    graph.add_conditional_edges(
+        "specialist_completed",
+        _workflow_completion_router,
+        {
+            "memory_persist": (
+                "memory_persist"
+            ),
+            "finalizer": "finalizer",
+        },
+    )
+
+    # ==============================================================
+    # 18. Recovery Router
     #
     # retry:
     #     → 原 Specialist
@@ -427,7 +695,7 @@ def build_enterprise_graph(
     #     → Human Review
     #
     # failed:
-    #     → Memory Persist
+    #     → Memory Persist / Finalizer
     # ==============================================================
 
     recovery_routes: dict[str, str] = {
@@ -458,7 +726,7 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 18. Human Review Router
+    # 19. Human Review Router
     #
     # human_retry:
     #     → 原 Specialist
@@ -497,7 +765,7 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 19. Memory Persist → Finalizer
+    # 20. Memory Persist → Finalizer
     # ==============================================================
 
     if memory_manager is not None:
@@ -508,7 +776,7 @@ def build_enterprise_graph(
         )
 
     # ==============================================================
-    # 20. Finalizer → END
+    # 21. Finalizer → END
     # ==============================================================
 
     graph.add_edge(
@@ -517,9 +785,11 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 21. Compile
+    # 22. Compile
     # ==============================================================
 
-    return graph.compile(
+    compiled_graph = graph.compile(
         checkpointer=checkpointer,
     )
+
+    return compiled_graph
