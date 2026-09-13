@@ -89,93 +89,39 @@ def _print_workflow_result(
     """
 
     print("========== Workflow Result ==========")
-    print(
-        f"Selected Agent: {_one_line(state.get('current_agent'))}"
-    )
-    print(
-        f"Next Agent: {_one_line(state.get('next_agent'))}"
-    )
-    print(
-        f"Task Status: {_one_line(state.get('task_status'))}"
-    )
-    print(
-        f"Workflow Complete: {_one_line(state.get('workflow_complete', False))}"
-    )
-    print(
-        f"Completed Agents: {_one_line(state.get('completed_agents', []))}"
-    )
-    print(
-        f"Routing Reason: {_one_line(state.get('handoff_reason'))}"
-    )
-    print(
-        f"Approval Required: {_one_line(state.get('approval_required', False))}"
-    )
-    print(
-        f"Approval Status: {_one_line(state.get('approval_status'))}"
-    )
-    print(
-        f"Approval Events: {_one_line(state.get('approval_events', []))}"
-    )
-    print(
-        f"Retrieved Memories: {_one_line(state.get('retrieved_memories', []))}"
-    )
-    print(
-        f"Memory Persisted: {_one_line(state.get('memory_persisted'))}"
-    )
-    print(
-        f"Memory Operation: {_one_line(state.get('memory_operation'))}"
-    )
-    print(
-        f"Memory Persist Reason: {_one_line(state.get('memory_persist_reason'))}"
-    )
-    print(
-        f"Recovery Attempts: {_one_line(state.get('recovery_attempts', 0))}"
-    )
-    print(
-        f"Recovery Status: {_one_line(state.get('recovery_status'))}"
-    )
-    print(
-        f"Recovery Reason: {_one_line(state.get('recovery_reason'))}"
-    )
-    print(
-        f"Resume Required: {_one_line(state.get('resume_required', False))}"
-    )
-    print(
-        f"Tool Results: {_one_line(state.get('tool_results', []))}"
-    )
-    print(
-        f"Workflow Error: {_one_line(state.get('error'))}"
-    )
-    print(
-        f"Last Failed Node: {_one_line(state.get('last_failed_node'))}"
-    )
-    print(
-        f"Last Failed Tool: {_one_line(state.get('last_failed_tool'))}"
-    )
-
-    print(
-        "========== Execution Summary =========="
-    )
-    print(
-        f"Execution Summary: {_one_line(state.get('execution_summary', {}))}"
-    )
-
-    print(
-        "========== Final Answer =========="
-    )
+    print(f"Selected Agent: {_one_line(state.get('current_agent'))}")
+    print(f"Next Agent: {_one_line(state.get('next_agent'))}")
+    print(f"Task Status: {_one_line(state.get('task_status'))}")
+    print(f"Workflow Complete: {_one_line(state.get('workflow_complete', False))}")
+    print(f"Completed Agents: {_one_line(state.get('completed_agents', []))}")
+    print(f"Routing Reason: {_one_line(state.get('handoff_reason'))}")
+    print(f"Approval Required: {_one_line(state.get('approval_required', False))}")
+    print(f"Approval Status: {_one_line(state.get('approval_status'))}")
+    print(f"Approval Events: {_one_line(state.get('approval_events', []))}")
+    print(f"Retrieved Memories: {_one_line(state.get('retrieved_memories', []))}")
+    print(f"Memory Persisted: {_one_line(state.get('memory_persisted'))}")
+    print(f"Memory Operation: {_one_line(state.get('memory_operation'))}")
+    print(f"Memory Persist Reason: {_one_line(state.get('memory_persist_reason'))}")
+    print(f"Recovery Attempts: {_one_line(state.get('recovery_attempts', 0))}")
+    print(f"Recovery Status: {_one_line(state.get('recovery_status'))}")
+    print(f"Recovery Reason: {_one_line(state.get('recovery_reason'))}")
+    print(f"Resume Required: {_one_line(state.get('resume_required', False))}")
+    print(f"Tool Results: {_one_line(state.get('tool_results', []))}")
+    print(f"Workflow Error: {_one_line(state.get('error'))}")
+    print(f"Last Failed Node: {_one_line(state.get('last_failed_node'))}")
+    print(f"Last Failed Tool: {_one_line(state.get('last_failed_tool'))}")
+    print("========== Execution Summary ==========")
+    print(f"Execution Summary: {_one_line(state.get('execution_summary', {}))}")
+    print("========== Final Answer ==========")
 
     final_answer = state.get(
         "final_answer"
     )
 
     if final_answer:
-        print(
-            f"Final Answer: {_one_line(final_answer)}"
-        )
+        print(f"Final Answer: {_one_line(final_answer)}")
     else:
-        print(
-            "Final Answer: Workflow 已结束，但 Finalizer 未生成最终回答。"
-        )
+        print("Final Answer: Workflow 已结束，但 Finalizer 未生成最终回答。")
 
 
 # ==============================================================
@@ -203,12 +149,8 @@ async def _resume_tool_hitl(
             response.interrupts[0].value
         )
 
-        print(
-            "========== Workflow Interrupted =========="
-        )
-        print(
-            f"Interrupt: {_one_line(interrupt_value)}"
-        )
+        print("========== Workflow Interrupted ==========")
+        print(f"Interrupt: {_one_line(interrupt_value)}")
 
         # ======================================================
         # Workflow-level Recovery HITL
@@ -238,9 +180,7 @@ async def _resume_tool_hitl(
                 }:
                     break
 
-                print(
-                    "Invalid decision. Please enter retry, reroute, or reject."
-                )
+                print("Invalid decision. Please enter retry, reroute, or reject.")
 
             response = await graph.ainvoke(
                 Command(
@@ -263,9 +203,7 @@ async def _resume_tool_hitl(
         # Tool-level HITL
         # ======================================================
 
-        print(
-            "This is a Tool-level HITL interrupt."
-        )
+        print("This is a Tool-level HITL interrupt.")
 
         if isinstance(
             interrupt_value,
@@ -284,35 +222,23 @@ async def _resume_tool_hitl(
             review_configs = []
 
         if not action_requests:
-            print(
-                "No action requests found in the HITL interrupt."
-            )
+            print("No action requests found in the HITL interrupt.")
             return response
 
-        print(
-            "========== Tool Approval =========="
-        )
+        print("========== Tool Approval ==========")
 
         for index, action in enumerate(
             action_requests
         ):
 
-            print(
-                f"Action #{index + 1}: Tool={_one_line(action.get('name'))}"
-            )
-            print(
-                f"Action #{index + 1}: Args={_one_line(action.get('args'))}"
-            )
-            print(
-                f"Action #{index + 1}: Description={_one_line(action.get('description'))}"
-            )
+            print(f"Action #{index + 1}: Tool={_one_line(action.get('name'))}")
+            print(f"Action #{index + 1}: Args={_one_line(action.get('args'))}")
+            print(f"Action #{index + 1}: Description={_one_line(action.get('description'))}")
 
             if index < len(
                 review_configs
             ):
-                print(
-                    f"Action #{index + 1}: Allowed decisions={_one_line(review_configs[index].get('allowed_decisions', []))}"
-                )
+                print(f"Action #{index + 1}: Allowed decisions={_one_line(review_configs[index].get('allowed_decisions', []))}")
 
         # ======================================================
         # Human Decision
@@ -331,9 +257,7 @@ async def _resume_tool_hitl(
             }:
                 break
 
-            print(
-                "Invalid decision. Please enter approve, edit, or reject."
-            )
+            print("Invalid decision. Please enter approve, edit, or reject.")
 
         # ======================================================
         # Approve
@@ -384,9 +308,7 @@ async def _resume_tool_hitl(
                     {},
                 )
 
-                print(
-                    f"Current tool arguments: {_one_line(current_args)}"
-                )
+                print(f"Current tool arguments: {_one_line(current_args)}")
 
                 decisions.append(
                     {
@@ -487,7 +409,7 @@ async def main() -> None:
     # ==========================================================
 
     config = get_config(
-        "multi-specialist-test-002"
+        "research-agent-test-007"
     )
 
     # ==========================================================
@@ -628,13 +550,10 @@ async def main() -> None:
             # ==================================================
 
             query = (
-                "查询 payment-service 当前健康状态。"
-                "如果发现服务异常，请创建一个 P1 Incident 工单。"
+                "请检查 payment-service 当前健康状态。如果状态为 degraded，请创建一个 P1 Incident 工单，标题为“conditional routing test”。"
             )
 
-            print(
-                f"Test Query: {query}"
-            )
+            print(f"Test Query: {query}")
 
             # ==================================================
             # 13. Initial State
