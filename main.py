@@ -652,7 +652,6 @@ async def _resume_tool_hitl(
                     "decisions": decisions,
                 },
                 update={
-                    "approval_required": False,
                     "approval_status": (
                         approval_status
                     ),

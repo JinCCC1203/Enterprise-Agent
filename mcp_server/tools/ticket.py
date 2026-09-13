@@ -5,6 +5,8 @@ from typing import Any
 
 from mcp.server import MCPServer
 
+import os
+_failure_injected = False
 
 # ---------------------------------------------------------------------------
 # Mock enterprise ticket system
@@ -106,6 +108,12 @@ def register_ticket_tools(mcp: MCPServer) -> None:
         Returns:
             创建结果以及新工单信息。
         """
+
+        if os.getenv("FORCE_CREATE_TICKET_FAILURE") == "1":
+            raise RuntimeError(
+                "Simulated create_ticket failure for Recovery test"
+            )
+
         title = title.strip()
         description = description.strip()
         priority = priority.strip().upper()
