@@ -152,6 +152,14 @@ def _print_workflow_result(
         ),
     )
 
+    print(
+        "Approval Events:",
+        state.get(
+            "approval_events",
+            [],
+        ),
+    )
+
     # ----------------------------------------------------------
     # Memory
     # ----------------------------------------------------------
@@ -297,7 +305,7 @@ def _print_workflow_result(
 
 
 # ==============================================================
-# Tool-level HITL Resume
+# Tool-level / Workflow-level HITL Resume
 # ==============================================================
 
 async def _resume_tool_hitl(
@@ -308,9 +316,12 @@ async def _resume_tool_hitl(
     context: EnterpriseAgentContext,
 ) -> Any:
     """
-    处理 Tool-level HITL。
+    处理：
 
-    本地测试：
+        1. Tool-level HITL
+        2. Workflow-level Recovery HITL
+
+    当前本地测试：
 
         interrupt
             ↓
@@ -384,9 +395,13 @@ async def _resume_tool_hitl(
             # --------------------------------------------------
             # Workflow Recovery Resume
             #
-            # 注意：
-            # approval_status 不应该被当作 Recovery
-            # 的审批状态，所以这里不修改 approval_status。
+            # Recovery Decision 与 Tool Approval
+            # 是两套不同语义。
+            #
+            # 因此：
+            #
+            # 不修改 approval_status
+            # 不增加 approval_events
             # --------------------------------------------------
 
             response = await graph.ainvoke(
@@ -535,9 +550,7 @@ async def _resume_tool_hitl(
                 for _ in action_requests
             ]
 
-            approval_status = (
-                "approved"
-            )
+            approval_status = "approved"
 
         # ======================================================
         # Reject
@@ -552,15 +565,15 @@ async def _resume_tool_hitl(
                 for _ in action_requests
             ]
 
-            approval_status = (
-                "rejected"
-            )
+            approval_status = "rejected"
 
         # ======================================================
         # Edit
         #
-        # 当前仍使用原 args 验证 edit resume 链路。
-        # 后续再扩展成交互式编辑。
+        # 当前先保留原 args，
+        # 用于验证 edit → resume 链路。
+        #
+        # 后续可以扩展成真正的参数编辑。
         # ======================================================
 
         else:
@@ -594,12 +607,43 @@ async def _resume_tool_hitl(
                     }
                 )
 
-            approval_status = (
-                "edited"
-            )
+            approval_status = "edited"
+
+        # ======================================================
+        # Build Approval Event
+        #
+        # 一次 interrupt 对应一个 approval event。
+        #
+        # 如果 action_requests 中包含多个 Tool，
+        # 则记录为同一个事件中的多个 tool_names。
+        # ======================================================
+
+        approval_event = {
+            "type": "tool_approval",
+            "tool_names": [
+                action.get(
+                    "name"
+                )
+                for action in action_requests
+                if action.get(
+                    "name"
+                )
+            ],
+            "decision": approval_status,
+        }
 
         # ======================================================
         # Resume SAME thread
+        #
+        # approval_status:
+        #     最近一次审批结果
+        #
+        # approval_events:
+        #     整个 Workflow 的审批历史
+        #
+        # approval_required:
+        #     当前 approval 已完成，
+        #     因此恢复后设为 False。
         # ======================================================
 
         response = await graph.ainvoke(
@@ -608,9 +652,13 @@ async def _resume_tool_hitl(
                     "decisions": decisions,
                 },
                 update={
-                    "approval_required": True,
-                    "approval_status":
-                        approval_status,
+                    "approval_required": False,
+                    "approval_status": (
+                        approval_status
+                    ),
+                    "approval_events": [
+                        approval_event
+                    ],
                 },
             ),
             config=config,
@@ -636,6 +684,7 @@ async def main() -> None:
     )
 
     if not deepseek_api_key:
+
         raise ValueError(
             "DEEPSEEK_API_KEY is not configured."
         )
@@ -667,7 +716,7 @@ async def main() -> None:
 
     # ==========================================================
     # 4. Tool Registry
-    # ==========================================================
+    # ==============================================================
 
     async with create_tool_registry() as registry:
 
@@ -720,18 +769,6 @@ async def main() -> None:
 
         # ======================================================
         # 8. Shared Middleware
-        #
-        #     DynamicToolMiddleware
-        #            ↓
-        #     Logging / PII
-        #            ↓
-        #     Tool HITL
-        #            ↓
-        #     ToolError
-        #            ↓
-        #     ToolRetry
-        #            ↓
-        #        Tool
         # ======================================================
 
         agent_middleware = [
@@ -752,6 +789,7 @@ async def main() -> None:
         )
 
         if not memory_database_url:
+
             raise ValueError(
                 "MEMORY_DATABASE_URL is not configured."
             )
@@ -789,8 +827,10 @@ async def main() -> None:
         )
 
         if not langgraph_database_url:
+
             raise ValueError(
-                "LANGGRAPH_DATABASE_URL is not configured."
+                "LANGGRAPH_DATABASE_URL "
+                "is not configured."
             )
 
         async with AsyncPostgresSaver.from_conn_string(
@@ -800,7 +840,7 @@ async def main() -> None:
             await checkpointer.setup()
 
             # ==================================================
-            # 11. Build Graph
+            # 11. Build Enterprise Graph
             # ==================================================
 
             graph = build_enterprise_graph(
@@ -813,10 +853,11 @@ async def main() -> None:
             )
 
             # ==================================================
-            # 12. Initial State
+            # 12. Initial Graph State
             # ==================================================
 
             initial_state = {
+
                 # ------------------------------------------------
                 # Conversation
                 # ------------------------------------------------
@@ -834,7 +875,7 @@ async def main() -> None:
                 ],
 
                 # ------------------------------------------------
-                # Memory
+                # Long-term Memory
                 # ------------------------------------------------
 
                 "retrieved_memories": [],
@@ -856,24 +897,26 @@ async def main() -> None:
                 "task_status": "running",
 
                 # ------------------------------------------------
-                # Routing
+                # Routing / Handoff
                 # ------------------------------------------------
 
                 "handoff_reason": None,
 
                 # ------------------------------------------------
-                # Tool
+                # Tool Execution
                 # ------------------------------------------------
 
                 "tool_results": [],
 
                 # ------------------------------------------------
-                # HITL
+                # Tool-level HITL
                 # ------------------------------------------------
 
                 "approval_required": False,
 
                 "approval_status": None,
+
+                "approval_events": [],
 
                 # ------------------------------------------------
                 # Error
@@ -886,7 +929,7 @@ async def main() -> None:
                 "last_failed_tool": None,
 
                 # ------------------------------------------------
-                # Recovery
+                # Workflow Recovery
                 # ------------------------------------------------
 
                 "recovery_attempts": 0,
@@ -898,7 +941,7 @@ async def main() -> None:
                 "resume_required": False,
 
                 # ------------------------------------------------
-                # Finalizer
+                # Finalization
                 # ------------------------------------------------
 
                 "final_answer": None,
@@ -907,7 +950,7 @@ async def main() -> None:
             }
 
             # ==================================================
-            # 13. Initial Run
+            # 13. Initial Workflow Execution
             # ==================================================
 
             response = await graph.ainvoke(
@@ -937,7 +980,7 @@ async def main() -> None:
             final_state = response.value
 
             # ==================================================
-            # 16. Print
+            # 16. Print Final Result
             # ==================================================
 
             _print_workflow_result(
@@ -950,6 +993,10 @@ async def main() -> None:
 
         await memory_manager.close()
 
+
+# ==============================================================
+# Entry Point
+# ==============================================================
 
 if __name__ == "__main__":
     asyncio.run(
