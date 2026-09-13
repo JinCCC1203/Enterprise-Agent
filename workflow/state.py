@@ -163,6 +163,8 @@ class EnterpriseAgentState(TypedDict, total=False):
 
     handoff_reason: str | None
 
+    handoff_task: str | None
+
     # ==============================================================
     # Tool / Execution
     # ==============================================================

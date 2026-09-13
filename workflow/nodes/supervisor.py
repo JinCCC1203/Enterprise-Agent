@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import json
-
 from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from workflow.state import (
-    EnterpriseAgentState,
-)
+from workflow.state import EnterpriseAgentState
 
 
 # ==============================================================
@@ -35,19 +32,14 @@ class SupervisorDecision(BaseModel):
         或者 end 表示整个 Workflow 已完成。
 
     reason:
-        说明当前路由决策的原因。
+        当前路由决策的原因。
 
     task:
-        给下一 Specialist 的简洁任务描述。
+        给下一 Specialist 的具体任务描述。
+        该字段会被写入 Graph State 的 handoff_task。
 
     workflow_complete:
         是否整个 Workflow 已经完成。
-
-        True：
-            当前用户请求已经全部满足，可以结束 Workflow。
-
-        False：
-            仍然需要继续执行 Specialist。
     """
 
     next_agent: SupervisorAgent = Field(
@@ -56,7 +48,7 @@ class SupervisorDecision(BaseModel):
             "Must be one of: "
             "knowledge_agent, operations_agent, "
             "ticket_agent, research_agent, end."
-        )
+        ),
     )
 
     reason: str = Field(
@@ -67,6 +59,10 @@ class SupervisorDecision(BaseModel):
     )
 
     task: str = Field(
+        default=(
+            "Continue the workflow based on "
+            "the selected agent."
+        ),
         min_length=1,
         description=(
             "Concise task description for the selected "
@@ -79,8 +75,51 @@ class SupervisorDecision(BaseModel):
             "Whether the entire user workflow is complete. "
             "True only when no further specialist execution "
             "is required."
-        )
+        ),
     )
+
+    @field_validator(
+        "task",
+        mode="before",
+    )
+    @classmethod
+    def normalize_task(
+        cls,
+        value: object,
+    ) -> str:
+        """
+        归一化 LLM 可能返回的空 task。
+
+        某些模型在 JSON structured output 下可能返回：
+
+            "task": ""
+            "task": null
+
+        task 当前是 Specialist handoff 的辅助字段，
+        不应该因为空字符串直接导致整个 Workflow 失败。
+        """
+
+        if value is None:
+            return (
+                "Continue the workflow based on "
+                "the selected agent."
+            )
+
+        if not isinstance(
+            value,
+            str,
+        ):
+            value = str(value)
+
+        value = value.strip()
+
+        if not value:
+            return (
+                "Continue the workflow based on "
+                "the selected agent."
+            )
+
+        return value
 
 
 # ==============================================================
@@ -96,8 +135,7 @@ def create_supervisor_node(
 
     Supervisor 是 Enterprise-Agent 的 Workflow Planner。
 
-    与之前的单轮 Supervisor 不同，
-    当前 Supervisor 每次执行都会综合：
+    每次执行都会综合：
 
         1. 用户原始 Query
         2. Retrieved Memories
@@ -105,7 +143,8 @@ def create_supervisor_node(
         4. 已完成 Specialist
         5. Tool Execution Results
         6. 当前 Specialist
-        7. 当前 task_status
+        7. 当前 handoff_task
+        8. 当前 task_status
 
     然后决定：
 
@@ -161,6 +200,10 @@ def create_supervisor_node(
             "current_agent",
         )
 
+        handoff_task = state.get(
+            "handoff_task",
+        )
+
         task_status = state.get(
             "task_status",
             "unknown",
@@ -187,6 +230,7 @@ def create_supervisor_node(
                 "handoff_reason": (
                     "No user query was found."
                 ),
+                "handoff_task": None,
                 "current_agent": None,
             }
 
@@ -203,6 +247,7 @@ def create_supervisor_node(
                     "The workflow has already been "
                     "completed."
                 ),
+                "handoff_task": None,
                 "current_agent": None,
             }
 
@@ -216,6 +261,7 @@ def create_supervisor_node(
             completed_agents=completed_agents,
             tool_results=tool_results,
             current_agent=current_agent,
+            handoff_task=handoff_task,
             task_status=task_status,
         )
 
@@ -246,36 +292,33 @@ def create_supervisor_node(
         # ----------------------------------------------------------
         # 7. 防御性修正
         #
-        # end 必须对应 workflow_complete=True
-        # specialist 必须对应 workflow_complete=False
+        # end：
+        #   workflow_complete=True
+        #
+        # specialist：
+        #   workflow_complete=False
         # ----------------------------------------------------------
 
         if decision.next_agent == "end":
             final_workflow_complete = True
             final_task_status = "completed"
+            next_current_agent = None
+            next_handoff_task = None
 
         else:
             final_workflow_complete = False
             final_task_status = "running"
-
-        # ----------------------------------------------------------
-        # 8. 计算 next current_agent
-        # ----------------------------------------------------------
-
-        next_current_agent: str | None
-
-        if decision.next_agent == "end":
-            next_current_agent = None
-        else:
             next_current_agent = decision.next_agent
+            next_handoff_task = decision.task
 
         # ----------------------------------------------------------
-        # 9. 写入 Graph State
+        # 8. 写入 Graph State
         # ----------------------------------------------------------
 
         return {
             "next_agent": decision.next_agent,
             "current_agent": next_current_agent,
+            "handoff_task": next_handoff_task,
             "workflow_complete": final_workflow_complete,
             "task_status": final_task_status,
             "handoff_reason": decision.reason,
@@ -295,22 +338,19 @@ def _build_supervisor_prompt(
     completed_agents: list[str],
     tool_results: list[Any],
     current_agent: str | None,
+    handoff_task: str | None,
     task_status: str,
 ) -> str:
     """
     构造 Multi-Specialist Supervisor Prompt。
 
-    Supervisor 的核心问题是：
+    Supervisor 的核心问题：
 
-        “当前已经完成了什么？
-         还缺什么？
-         下一步应该由谁完成？”
-
-    因此 Prompt 必须明确提供：
-        - 已完成 Specialist
-        - Tool Execution Facts
-        - 当前 Agent
-        - 当前 Task Status
+        当前已经完成了什么？
+        当前拿到了什么事实？
+        还缺什么？
+        下一步应该由谁完成？
+        应该把什么具体任务交给这个 Specialist？
     """
 
     # ----------------------------------------------------------
@@ -343,20 +383,33 @@ def _build_supervisor_prompt(
     # Tool Results
     # ----------------------------------------------------------
 
-    tool_results_text = _format_tool_results_for_prompt(
-        tool_results
+    tool_results_text = (
+        _format_tool_results_for_prompt(
+            tool_results
+        )
+    )
+
+    # ----------------------------------------------------------
+    # Current Handoff Task
+    # ----------------------------------------------------------
+
+    current_handoff_task_text = (
+        handoff_task
+        if handoff_task
+        else "None"
     )
 
     return f"""
 You are the Supervisor of an enterprise multi-agent system.
 
-Your role is WORKFLOW PLANNING.
+Your role is WORKFLOW PLANNING and TASK DELEGATION.
 
 You MUST decide what should happen NEXT based on:
     1. the user's original request,
     2. completed specialist agents,
     3. tool execution results,
-    4. current workflow state.
+    4. current workflow state,
+    5. current handoff task.
 
 You MUST NOT execute tools.
 You MUST NOT generate the final user answer.
@@ -457,6 +510,53 @@ Therefore, the Supervisor must reason over previous
 Tool Results and completed specialists.
 
 ============================================================
+TASK HANDOFF RULE
+============================================================
+
+When selecting a specialist, you MUST create a concise
+task description specifically for that Specialist.
+
+The "task" field is NOT the entire user query.
+
+It should describe only the next concrete responsibility.
+
+Example:
+
+User:
+"Check payment-service health. If degraded, create a P1
+incident."
+
+First handoff:
+
+next_agent:
+    "operations_agent"
+
+task:
+    "Check the current health status of payment-service
+     and determine whether it is abnormal."
+
+Second handoff:
+
+next_agent:
+    "ticket_agent"
+
+task:
+    "Create a P1 Incident for the degraded payment-service
+     using the health-check result."
+
+When the workflow ends:
+
+next_agent:
+    "end"
+
+workflow_complete:
+    true
+
+task:
+    can be empty or omitted semantically, because no
+    Specialist is being handed a new task.
+
+============================================================
 IMPORTANT
 ============================================================
 
@@ -480,6 +580,8 @@ Otherwise:
 
     next_agent = "<specialist>"
     workflow_complete = false
+
+    task = "<specific handoff task>"
 
 
 ============================================================
@@ -549,6 +651,13 @@ CURRENT AGENT
 
 
 ============================================================
+CURRENT HANDOFF TASK
+============================================================
+
+{current_handoff_task_text}
+
+
+============================================================
 CURRENT TASK STATUS
 ============================================================
 
@@ -559,18 +668,22 @@ CURRENT TASK STATUS
 PLANNING INSTRUCTIONS
 ============================================================
 
-Before selecting the next agent, reason about:
+Before selecting the next agent, determine:
 
 1. What has already been completed?
 2. What information has already been obtained?
 3. What actions are still required?
-4. Which specialist is responsible for the remaining action?
-5. Is the overall user request fully satisfied?
+4. Which Specialist is responsible for the remaining action?
+5. What exact task should be delegated to that Specialist?
+6. Is the overall user request fully satisfied?
 
 Remember:
 
 A Specialist completing its own subtask does NOT necessarily
 mean the entire Workflow is complete.
+
+The "task" field must describe the next concrete Specialist
+responsibility.
 
 Return ONLY valid JSON.
 
@@ -579,7 +692,7 @@ Required format:
 {{
   "next_agent": "knowledge_agent | operations_agent | ticket_agent | research_agent | end",
   "reason": "Explain what remains and why the selected agent is the correct next step.",
-  "task": "Concise task description for the selected agent.",
+  "task": "Concise concrete task description for the selected specialist agent.",
   "workflow_complete": true
 }}
 
@@ -590,6 +703,8 @@ For any specialist:
 For "end":
 
     workflow_complete MUST be true.
+
+When next_agent is "end", task may be an empty string.
 """.strip()
 
 
@@ -603,8 +718,7 @@ def _format_tool_results_for_prompt(
     """
     将 Tool Execution Facts 转换成 Supervisor 可理解的文本。
 
-    Supervisor 不需要完整打印 MCP CallToolResult 对象，
-    只需要知道：
+    Supervisor 只需要知道：
 
         tool_name
         success / failure
@@ -622,7 +736,6 @@ def _format_tool_results_for_prompt(
         tool_results,
         start=1,
     ):
-
         if not isinstance(
             result,
             dict,
@@ -643,15 +756,15 @@ def _format_tool_results_for_prompt(
         )
 
         error_type = result.get(
-            "error_type"
+            "error_type",
         )
 
         error_message = result.get(
-            "error_message"
+            "error_message",
         )
 
         content = result.get(
-            "content"
+            "content",
         )
 
         status = (
@@ -680,12 +793,10 @@ def _format_tool_results_for_prompt(
                 )
 
         if content is not None:
-
             content_text = str(
                 content
             ).strip()
 
-            # 防止 MCP Result 过长污染 Supervisor Prompt
             max_length = 6000
 
             if len(content_text) > max_length:
@@ -716,15 +827,15 @@ def _extract_latest_user_query(
     支持：
 
     1. LangChain BaseMessage
-
     2. OpenAI-style dict
     """
 
-    for message in reversed(messages):
-
-        # ==========================================================
+    for message in reversed(
+        messages
+    ):
+        # ======================================================
         # 1. LangChain BaseMessage
-        # ==========================================================
+        # ======================================================
 
         if isinstance(
             message,
@@ -750,9 +861,9 @@ def _extract_latest_user_query(
 
             continue
 
-        # ==========================================================
+        # ======================================================
         # 2. OpenAI-style message dict
-        # ==========================================================
+        # ======================================================
 
         if isinstance(
             message,
@@ -792,15 +903,9 @@ def _extract_text_content(
     支持：
 
     1. str
-
     2. LangChain/OpenAI content blocks
-
     3. 字符串列表
     """
-
-    # ----------------------------------------------------------
-    # 1. String
-    # ----------------------------------------------------------
 
     if isinstance(
         content,
@@ -808,19 +913,13 @@ def _extract_text_content(
     ):
         return content.strip()
 
-    # ----------------------------------------------------------
-    # 2. List
-    # ----------------------------------------------------------
-
     if isinstance(
         content,
         list,
     ):
-
         text_parts: list[str] = []
 
         for block in content:
-
             if isinstance(
                 block,
                 str,
@@ -880,6 +979,9 @@ def _parse_decision(
 ) -> SupervisorDecision:
     """
     JSON Parse + Pydantic Validation。
+
+    对 task 做防御性归一化，避免模型返回 task=""
+    时导致整个 Supervisor Workflow 失败。
     """
 
     if not raw_content:
@@ -926,6 +1028,40 @@ def _parse_decision(
             "Supervisor returned invalid JSON."
         ) from exc
 
+    if not isinstance(
+        payload,
+        dict,
+    ):
+        raise ValueError(
+            "Supervisor decision must be a JSON object."
+        )
+
+    # ----------------------------------------------------------
+    # task 防御性归一化
+    # ----------------------------------------------------------
+
+    task = payload.get(
+        "task"
+    )
+
+    if (
+        task is None
+        or (
+            isinstance(
+                task,
+                str,
+            )
+            and not task.strip()
+        )
+    ):
+        payload = {
+            **payload,
+            "task": (
+                "Continue the workflow based on "
+                "the selected agent."
+            ),
+        }
+
     # ----------------------------------------------------------
     # Pydantic Validation
     # ----------------------------------------------------------
@@ -965,3 +1101,4 @@ def _parse_decision(
         )
 
     return decision
+

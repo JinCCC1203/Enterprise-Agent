@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
@@ -31,12 +31,66 @@ from workflow.utils.execution_facts import (
 )
 
 
+# ==============================================================
+# Research Tool Scope
+# ==============================================================
+
 RESEARCH_TOOL_SCOPE = frozenset(
     {
         "web_search",
     }
 )
 
+
+# ==============================================================
+# Research Agent System Prompt
+# ==============================================================
+
+RESEARCH_AGENT_SYSTEM_PROMPT = """
+You are the Research Specialist Agent in an enterprise
+multi-agent workflow.
+
+Your responsibility is to execute the external research
+task delegated by the Supervisor.
+
+Available tool:
+
+- web_search
+
+IMPORTANT EXECUTION RULES:
+
+1. You MUST follow the Supervisor's current handoff task.
+
+2. If the handoff task requires external information,
+   public documentation, current information, news, or
+   internet research, you MUST call web_search.
+
+3. Do NOT claim that external information was verified
+   unless web_search was actually executed successfully.
+
+4. For current or time-sensitive information, trust live
+   web_search results rather than historical memory.
+
+5. Do not perform unrelated research.
+
+6. When the required search succeeds, summarize the actual
+   search result and stop.
+
+7. A natural-language response alone does NOT mean the
+   delegated research task has been completed.
+
+8. The surrounding Agent Runtime is responsible for:
+   Permission Policy, Retry, Error Handling, Recovery,
+   and Human-in-the-Loop.
+
+9. Treat the Supervisor handoff task as the current
+   execution boundary for this Specialist.
+""".strip()
+
+
+# ==============================================================
+# Create Research Agent
+# ==============================================================
 
 def create_research_agent(
     *,
@@ -118,9 +172,11 @@ def create_research_agent(
         config: RunnableConfig,
     ) -> dict[str, Any]:
 
-        messages = state.get(
-            "messages",
-            [],
+        messages = list(
+            state.get(
+                "messages",
+                [],
+            )
         )
 
         retrieved_memories = state.get(
@@ -128,31 +184,59 @@ def create_research_agent(
             [],
         )
 
-        memory_context = (
-            _build_memory_context(
-                retrieved_memories
+        handoff_task = state.get(
+            "handoff_task",
+        )
+
+        # ==========================================================
+        # 8. Build Context
+        # ==========================================================
+
+        memory_context = _build_memory_context(
+            retrieved_memories
+        )
+
+        handoff_context = _build_handoff_context(
+            handoff_task
+        )
+
+        # ==========================================================
+        # 9. Build Agent Messages
+        # ==========================================================
+
+        agent_messages: list[Any] = []
+
+        agent_messages.append(
+            SystemMessage(
+                content=(
+                    RESEARCH_AGENT_SYSTEM_PROMPT
+                )
             )
         )
 
-        agent_messages = list(
+        agent_messages.extend(
             messages
         )
 
         if memory_context:
-
-            agent_messages.insert(
-                0,
+            agent_messages.append(
                 HumanMessage(
                     content=memory_context
-                ),
+                )
+            )
+
+        if handoff_context:
+            agent_messages.append(
+                HumanMessage(
+                    content=handoff_context
+                )
             )
 
         # ==========================================================
-        # Agent Runtime
+        # 10. Execute Agent
         # ==========================================================
 
         try:
-
             result = await agent.ainvoke(
                 {
                     "messages": agent_messages,
@@ -162,7 +246,6 @@ def create_research_agent(
             )
 
         except GraphInterrupt:
-
             raise
 
         except Exception as exc:
@@ -172,7 +255,6 @@ def create_research_agent(
             ).strip()
 
             if not error_message:
-
                 error_message = (
                     type(exc).__name__
                 )
@@ -198,31 +280,34 @@ def create_research_agent(
 
             if failure is not None:
 
-                extracted_error = (
-                    failure.get(
-                        "error"
-                    )
+                message_error = failure.get(
+                    "error"
                 )
 
                 if (
                     isinstance(
-                        extracted_error,
+                        message_error,
                         str,
                     )
-                    and extracted_error.strip()
+                    and message_error.strip()
                 ):
-
                     error_message = (
-                        extracted_error
+                        message_error
                     )
 
                 if not failed_tool:
-
                     failed_tool = (
                         failure.get(
                             "last_failed_tool"
                         )
                     )
+
+            previous_tool_results = list(
+                state.get(
+                    "tool_results",
+                    [],
+                )
+            )
 
             return {
                 "messages": state.get(
@@ -238,16 +323,11 @@ def create_research_agent(
                     "research_agent"
                 ),
                 "last_failed_tool": failed_tool,
-                "tool_results": list(
-                    state.get(
-                        "tool_results",
-                        [],
-                    )
-                ),
+                "tool_results": previous_tool_results,
             }
 
         # ==========================================================
-        # Successful Agent Invocation
+        # 11. Successful Agent Invocation
         # ==========================================================
 
         result_messages = result.get(
@@ -280,7 +360,7 @@ def create_research_agent(
         )
 
         # ==========================================================
-        # Failure
+        # 12. Tool Error
         # ==========================================================
 
         if failure is not None:
@@ -306,7 +386,59 @@ def create_research_agent(
             }
 
         # ==========================================================
-        # Success
+        # 13. Required Tool Verification
+        # ==============================================================
+
+        required_tools = (
+            _get_required_research_tools(
+                handoff_task
+            )
+        )
+
+        if required_tools:
+
+            missing_tools = (
+                _find_missing_successful_tools(
+                    required_tools,
+                    current_tool_results,
+                )
+            )
+
+            if missing_tools:
+
+                missing_tool_names = ", ".join(
+                    sorted(
+                        missing_tools
+                    )
+                )
+
+                missing_tool = next(
+                    iter(
+                        missing_tools
+                    ),
+                    None,
+                )
+
+                return {
+                    "messages": result_messages,
+                    "current_agent": (
+                        "research_agent"
+                    ),
+                    "task_status": "failed",
+                    "error": (
+                        "Research Specialist did not execute "
+                        "the required tool(s): "
+                        f"{missing_tool_names}"
+                    ),
+                    "last_failed_node": (
+                        "research_agent"
+                    ),
+                    "last_failed_tool": missing_tool,
+                    "tool_results": tool_results,
+                }
+
+        # ==========================================================
+        # 14. Success
         # ==========================================================
 
         return {
@@ -321,12 +453,18 @@ def create_research_agent(
     return research_agent_node
 
 
+# ==============================================================
+# Tool Result Merge
+# ==============================================================
+
 def _merge_tool_results(
     previous: list[dict[str, Any]],
     current: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
     合并历史与当前 Tool Results。
+
+    通过 tool_call_id 去重。
     """
 
     merged: list[dict[str, Any]] = []
@@ -354,7 +492,6 @@ def _merge_tool_results(
         ) and tool_call_id:
 
             if tool_call_id in seen_ids:
-
                 continue
 
             seen_ids.add(
@@ -368,21 +505,165 @@ def _merge_tool_results(
     return merged
 
 
+# ==============================================================
+# Required Research Tool Detection
+# ==============================================================
+
+def _get_required_research_tools(
+    handoff_task: str | None,
+) -> set[str]:
+    """
+    根据 Supervisor handoff_task 判断是否要求
+    Research Specialist 执行 web_search。
+    """
+
+    if not handoff_task:
+        return set()
+
+    task = handoff_task.strip().lower()
+
+    required_tools: set[str] = set()
+
+    research_keywords = (
+        "web_search",
+        "web search",
+        "search the web",
+        "search online",
+        "internet search",
+        "online search",
+        "external research",
+        "external information",
+        "public information",
+        "public documentation",
+        "official documentation",
+        "current information",
+        "latest information",
+        "news",
+        "research",
+        "互联网搜索",
+        "网络搜索",
+        "网页搜索",
+        "搜索互联网",
+        "搜索网络",
+        "外部信息",
+        "外部研究",
+        "公开信息",
+        "公开文档",
+        "官方文档",
+        "最新信息",
+        "实时信息",
+        "新闻",
+        "研究",
+    )
+
+    if any(
+        keyword in task
+        for keyword in research_keywords
+    ):
+        required_tools.add(
+            "web_search"
+        )
+
+    return required_tools
+
+
+# ==============================================================
+# Required Tool Success Verification
+# ==============================================================
+
+def _find_missing_successful_tools(
+    required_tools: set[str],
+    current_tool_results: list[dict[str, Any]],
+) -> set[str]:
+    """
+    检查当前 Specialist invocation 是否真正成功执行
+    Supervisor 所要求的 Tool。
+    """
+
+    successful_tools: set[str] = set()
+
+    for result in current_tool_results:
+
+        if not isinstance(
+            result,
+            dict,
+        ):
+            continue
+
+        tool_name = result.get(
+            "tool_name"
+        )
+
+        if not isinstance(
+            tool_name,
+            str,
+        ):
+            continue
+
+        if result.get(
+            "error",
+            False,
+        ):
+            continue
+
+        successful_tools.add(
+            tool_name
+        )
+
+    return (
+        required_tools
+        - successful_tools
+    )
+
+
+# ==============================================================
+# Supervisor Handoff Context
+# ==============================================================
+
+def _build_handoff_context(
+    handoff_task: str | None,
+) -> str:
+    """
+    构造 Supervisor → Research Agent 的任务交接上下文。
+    """
+
+    if not handoff_task:
+        return ""
+
+    return (
+        "SUPERVISOR HANDOFF TASK\n"
+        "=======================\n\n"
+        "You are now executing the following task delegated "
+        "by the Supervisor:\n\n"
+        f"{handoff_task}\n\n"
+        "Execution requirements:\n"
+        "1. Complete the delegated task, not merely describe it.\n"
+        "2. If the task requires external, public, current, "
+        "or web-based information, you MUST call web_search.\n"
+        "3. Do not claim that external information was verified "
+        "unless web_search actually returned results.\n"
+        "4. For current or time-sensitive facts, rely on live "
+        "web_search results rather than historical memory.\n"
+        "5. After the required search succeeds, stop and "
+        "return a concise summary of the actual result."
+    )
+
+
+# ==============================================================
+# Long-term Memory Context
+# ==============================================================
+
 def _build_memory_context(
     memories: list[str],
 ) -> str:
     """
     构造长期记忆上下文。
 
-    Memory：
-        历史上下文。
-
-    web_search：
-        当前外部、实时信息的主要来源。
+    对当前、外部、实时信息：
+        web_search 是优先来源。
     """
 
     if not memories:
-
         return ""
 
     memory_text = "\n".join(
@@ -391,12 +672,11 @@ def _build_memory_context(
     )
 
     return (
-        "Relevant long-term memories retrieved "
-        "for this workflow:\n"
+        "RELEVANT LONG-TERM MEMORY\n"
+        "=========================\n\n"
         f"{memory_text}\n\n"
         "Use these memories only as contextual hints. "
-        "For current, external, or time-sensitive information, "
-        "always verify the information through the web_search "
-        "tool before presenting it as a current fact."
+        "For current, external, public, or time-sensitive "
+        "information, always verify through web_search."
     )
 

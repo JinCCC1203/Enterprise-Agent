@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 
 from memories.long_memory.manager import MemoryManager
 from policies.permission import PermissionPolicy
@@ -48,7 +50,6 @@ SPECIALIST_NAMES = (
 # Specialist Node Wrapper
 # ==============================================================
 
-
 def _wrap_specialist_node(
     specialist_name: str,
     node: Any,
@@ -56,36 +57,60 @@ def _wrap_specialist_node(
     """
     包装 Specialist Node。
 
-    Specialist 成功执行后，将其记录到：
-        state["completed_agents"]
+    注意：
+        Specialist Node 使用 LangGraph 的运行时依赖注入，
+        签名必须显式保留：
 
-    Wrapper 不负责：
-        - Tool Calling
-        - HITL
-        - Retry
-        - Error Handling
-        - Recovery Decision
+            state
+            runtime
+            config
 
-    只负责 Workflow bookkeeping。
+        不能使用 *args / **kwargs 替代，
+        否则 LangGraph 无法识别并注入 runtime/config。
+
+    Wrapper 只负责：
+
+        Specialist 成功
+            ↓
+        记录 completed_agents
+
+    Specialist 本身负责：
+
+        Tool Calling
+        Tool HITL
+        Tool Retry
+        Tool Error
+        Specialist Failure
     """
 
     async def wrapped_node(
         state: EnterpriseAgentState,
-        *args: Any,
-        **kwargs: Any,
+        runtime: Runtime[EnterpriseAgentContext],
+        config: RunnableConfig,
     ) -> dict[str, Any]:
+        # ==========================================================
+        # 1. 调用原始 Specialist Node
+        # ==========================================================
 
         result = await node(
             state,
-            *args,
-            **kwargs,
+            runtime,
+            config,
         )
+
+        # ==========================================================
+        # 2. 防御性检查
+        # ==========================================================
 
         if not isinstance(
             result,
             dict,
         ):
             return result
+
+        # ==========================================================
+        # 3. 获取 Specialist 执行状态
+        # ==========================================================
 
         task_status = result.get(
             "task_status",
@@ -94,6 +119,10 @@ def _wrap_specialist_node(
                 "running",
             ),
         )
+
+        # ==========================================================
+        # 4. Specialist 成功
+        # ==========================================================
 
         if task_status == "completed":
 
@@ -125,20 +154,21 @@ def _wrap_specialist_node(
 # Workflow Completion Router
 # ==============================================================
 
-
 def _workflow_completion_router(
     state: EnterpriseAgentState,
     *,
     memory_enabled: bool,
 ) -> str:
     """
-    Workflow 已确认完成后的最终路由。
+    Workflow 已经确认完成后的最终路由。
 
-    memory_enabled=True:
-        → memory_persist
+    workflow_complete=True:
 
-    memory_enabled=False:
-        → finalizer
+        memory_enabled=True
+            → memory_persist
+
+        memory_enabled=False
+            → finalizer
     """
 
     if state.get(
@@ -156,7 +186,6 @@ def _workflow_completion_router(
 # ==============================================================
 # Build Enterprise Graph
 # ==============================================================
-
 
 def build_enterprise_graph(
     *,
@@ -194,11 +223,30 @@ def build_enterprise_graph(
           └── completed +
               workflow_complete=True
                   ↓
+              Specialist Completed
+                  ↓
               Memory Persist
                   ↓
                Finalizer
                   ↓
                  END
+
+
+    Supervisor end:
+
+        Supervisor
+            ↓
+        specialist_completed
+            ↓
+        memory_persist
+            ↓
+        finalizer
+            ↓
+        END
+
+    这样确保：
+        Supervisor 最终决定 end 后，
+        Long-term Memory Persist 不会被绕过。
     """
 
     # ==============================================================
@@ -395,10 +443,18 @@ def build_enterprise_graph(
         state: EnterpriseAgentState,
     ) -> dict[str, Any]:
         """
-        Specialist 成功，并且 Supervisor 已经确认
-        整个 Workflow 完成。
+        Workflow 已经由 Supervisor 确认完成。
 
-        该节点不修改业务 State。
+        该节点本身不修改业务 State，
+        仅作为：
+
+            Supervisor
+                ↓
+            specialist_completed
+                ↓
+            Memory / Finalizer
+
+        的显式 Workflow Barrier。
         """
 
         return {}
@@ -443,7 +499,25 @@ def build_enterprise_graph(
             "operations_agent": "operations_agent",
             "ticket_agent": "ticket_agent",
             "research_agent": "research_agent",
-            "end": "finalizer",
+
+            # ======================================================
+            # IMPORTANT:
+            #
+            # Supervisor 的 end 不能直接 Finalizer。
+            #
+            # 必须经过:
+            #
+            # supervisor
+            #     ↓
+            # specialist_completed
+            #     ↓
+            # memory_persist
+            #     ↓
+            # finalizer
+            #
+            # 否则最终 Workflow 会绕过 Long-term Memory Persist。
+            # ======================================================
+            "end": "specialist_completed",
         },
     )
 
@@ -571,3 +645,4 @@ def build_enterprise_graph(
     )
 
     return compiled_graph
+

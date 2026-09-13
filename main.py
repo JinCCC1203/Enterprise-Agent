@@ -465,7 +465,11 @@ async def main() -> None:
         model="deepseek-v4-flash",
         api_key=deepseek_api_key,
         base_url="https://api.deepseek.com",
-        temperature=0,
+        extra_body={
+            "thinking": {
+                "type": "disabled",
+            }
+        },
     )
 
     # ==========================================================
@@ -483,7 +487,7 @@ async def main() -> None:
     # ==========================================================
 
     config = get_config(
-        "multi-specialist-test-001"
+        "multi-specialist-test-002"
     )
 
     # ==========================================================
@@ -630,9 +634,6 @@ async def main() -> None:
 
             print(
                 f"Test Query: {query}"
-            )
-            print(
-                f"Test Thread: {thread_id}"
             )
 
             # ==================================================
