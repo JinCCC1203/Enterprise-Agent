@@ -85,16 +85,29 @@ if sys.platform == "win32":
     )
 
 
+# ==============================================================
+# Workflow Result Printer
+# ==============================================================
+
 def _print_workflow_result(
     state: dict[str, Any],
 ) -> None:
     """
     打印最终 Workflow State。
+
+    注意：
+
+    final_answer 不再从 messages[-1] 推断，
+    而是由 Finalizer Node 根据 Runtime State 生成。
     """
 
     print(
         "\n========== Workflow Result =========="
     )
+
+    # ----------------------------------------------------------
+    # Agent / Workflow
+    # ----------------------------------------------------------
 
     print(
         "Selected Agent:",
@@ -114,6 +127,25 @@ def _print_workflow_result(
         "Routing Reason:",
         state.get(
             "handoff_reason"
+        ),
+    )
+
+    # ----------------------------------------------------------
+    # HITL
+    # ----------------------------------------------------------
+
+    print(
+        "Approval Required:",
+        state.get(
+            "approval_required",
+            False,
+        ),
+    )
+
+    print(
+        "Approval Status:",
+        state.get(
+            "approval_status"
         ),
     )
 
@@ -185,6 +217,18 @@ def _print_workflow_result(
     )
 
     # ----------------------------------------------------------
+    # Tool Execution
+    # ----------------------------------------------------------
+
+    print(
+        "Tool Results:",
+        state.get(
+            "tool_results",
+            [],
+        ),
+    )
+
+    # ----------------------------------------------------------
     # Error
     # ----------------------------------------------------------
 
@@ -213,48 +257,381 @@ def _print_workflow_result(
     )
 
     # ----------------------------------------------------------
-    # Final Answer
+    # Runtime Execution Truth
     # ----------------------------------------------------------
 
-    messages = state.get(
-        "messages",
-        [],
+    print(
+        "\n========== Execution Summary =========="
     )
 
-    if not messages:
-        print(
-            "\nAgent 未返回消息。"
+    print(
+        state.get(
+            "execution_summary",
+            {},
         )
-        return
-
-    final_message = messages[-1]
-
-    content = getattr(
-        final_message,
-        "content",
-        "",
     )
+
+    # ----------------------------------------------------------
+    # Final Answer
+    # ----------------------------------------------------------
 
     print(
         "\n========== Final Answer =========="
     )
 
-    print(
-        content
+    final_answer = state.get(
+        "final_answer"
     )
 
+    if final_answer:
+        print(
+            final_answer
+        )
+    else:
+        print(
+            "Agent 未生成最终回答。"
+        )
+
+
+# ==============================================================
+# Tool-level HITL
+# ==============================================================
+
+async def _resume_tool_hitl(
+    *,
+    graph: Any,
+    response: Any,
+    config: dict[str, Any],
+    context: EnterpriseAgentContext,
+) -> Any:
+    """
+    处理 HumanInTheLoopMiddleware 产生的 Tool-level HITL。
+
+    当前本地测试使用 input() 模拟人工审批。
+
+    生产环境中应该由：
+
+        API
+          ↓
+        Frontend
+          ↓
+        Human Decision
+          ↓
+        Command(resume=...)
+    """
+
+    while response.interrupts:
+
+        interrupt_value = (
+            response.interrupts[0].value
+        )
+
+        print(
+            "\n========== Workflow Interrupted =========="
+        )
+
+        print(
+            "Interrupt:",
+            interrupt_value,
+        )
+
+        # ------------------------------------------------------
+        # Workflow-level Recovery HITL
+        # ------------------------------------------------------
+
+        if (
+            isinstance(
+                interrupt_value,
+                dict,
+            )
+            and interrupt_value.get(
+                "type"
+            )
+            == "workflow_recovery_review"
+        ):
+
+            while True:
+
+                decision = input(
+                    "\nRecovery decision "
+                    "[retry/reroute/reject]: "
+                ).strip().lower()
+
+                if decision in {
+                    "retry",
+                    "reroute",
+                    "reject",
+                }:
+                    break
+
+                print(
+                    "Invalid decision. "
+                    "Please enter retry, "
+                    "reroute, or reject."
+                )
+
+            # --------------------------------------------------
+            # Resume Workflow-level HITL
+            # --------------------------------------------------
+
+            response = await graph.ainvoke(
+                Command(
+                    resume={
+                        "action": decision,
+                    },
+                    update={
+                        "approval_required": True,
+                        "approval_status": (
+                            "approved"
+                            if decision == "retry"
+                            else "edited"
+                            if decision == "reroute"
+                            else "rejected"
+                        ),
+                    },
+                ),
+                config=config,
+                context=context,
+                version="v2",
+            )
+
+            continue
+
+        # ------------------------------------------------------
+        # Tool-level HITL
+        # ------------------------------------------------------
+
+        print(
+            "\nThis is a Tool-level HITL interrupt."
+        )
+
+        action_requests = (
+            interrupt_value.get(
+                "action_requests",
+                [],
+            )
+            if isinstance(
+                interrupt_value,
+                dict,
+            )
+            else []
+        )
+
+        review_configs = (
+            interrupt_value.get(
+                "review_configs",
+                [],
+            )
+            if isinstance(
+                interrupt_value,
+                dict,
+            )
+            else []
+        )
+
+        if not action_requests:
+
+            print(
+                "No action requests found in "
+                "the HITL interrupt."
+            )
+
+            return response
+
+        # ------------------------------------------------------
+        # Display approval requests
+        # ------------------------------------------------------
+
+        print(
+            "\n========== Tool Approval =========="
+        )
+
+        for index, action in enumerate(
+            action_requests
+        ):
+
+            print(
+                f"\nAction #{index + 1}:"
+            )
+
+            print(
+                "Tool:",
+                action.get(
+                    "name"
+                ),
+            )
+
+            print(
+                "Args:",
+                action.get(
+                    "args"
+                ),
+            )
+
+            print(
+                "Description:",
+                action.get(
+                    "description"
+                ),
+            )
+
+            if index < len(
+                review_configs
+            ):
+
+                print(
+                    "Allowed decisions:",
+                    review_configs[
+                        index
+                    ].get(
+                        "allowed_decisions",
+                        [],
+                    ),
+                )
+
+        # ------------------------------------------------------
+        # Human decision
+        # ------------------------------------------------------
+
+        while True:
+
+            decision = input(
+                "\nTool decision "
+                "[approve/edit/reject]: "
+            ).strip().lower()
+
+            if decision in {
+                "approve",
+                "edit",
+                "reject",
+            }:
+                break
+
+            print(
+                "Invalid decision. "
+                "Please enter approve, "
+                "edit, or reject."
+            )
+
+        # ------------------------------------------------------
+        # Approve
+        # ------------------------------------------------------
+
+        if decision == "approve":
+
+            decisions = [
+                {
+                    "type": "approve",
+                }
+                for _ in action_requests
+            ]
+
+            approval_status = (
+                "approved"
+            )
+
+        # ------------------------------------------------------
+        # Reject
+        # ------------------------------------------------------
+
+        elif decision == "reject":
+
+            decisions = [
+                {
+                    "type": "reject",
+                }
+                for _ in action_requests
+            ]
+
+            approval_status = (
+                "rejected"
+            )
+
+        # ------------------------------------------------------
+        # Edit
+        #
+        # 当前版本先保留原参数，
+        # 用于验证 edit → resume 链路。
+        #
+        # 后续可增加逐字段编辑。
+        # ------------------------------------------------------
+
+        else:
+
+            decisions = []
+
+            for action in action_requests:
+
+                current_args = action.get(
+                    "args",
+                    {},
+                )
+
+                print(
+                    "\nCurrent tool arguments:"
+                )
+
+                print(
+                    current_args
+                )
+
+                edited_decision = {
+                    "type": "edit",
+                    "edited_action": {
+                        "name": action.get(
+                            "name"
+                        ),
+                        "args": current_args,
+                    },
+                }
+
+                decisions.append(
+                    edited_decision
+                )
+
+            approval_status = (
+                "edited"
+            )
+
+        # ------------------------------------------------------
+        # Resume SAME thread
+        # ------------------------------------------------------
+
+        response = await graph.ainvoke(
+            Command(
+                resume={
+                    "decisions": decisions,
+                },
+                update={
+                    "approval_required": True,
+                    "approval_status":
+                        approval_status,
+                },
+            ),
+            config=config,
+            context=context,
+            version="v2",
+        )
+
+    return response
+
+
+# ==============================================================
+# Main
+# ==============================================================
 
 async def main() -> None:
 
-    # ==============================================================
+    # ==========================================================
     # 1. Model
-    # ==============================================================
+    # ==========================================================
 
     deepseek_api_key = os.getenv(
         "DEEPSEEK_API_KEY"
     )
 
     if not deepseek_api_key:
+
         raise ValueError(
             "DEEPSEEK_API_KEY is not configured."
         )
@@ -266,9 +643,9 @@ async def main() -> None:
         temperature=0,
     )
 
-    # ==============================================================
+    # ==========================================================
     # 2. Runtime Context
-    # ==============================================================
+    # ==========================================================
 
     context = EnterpriseAgentContext(
         user_id="user_001",
@@ -276,44 +653,40 @@ async def main() -> None:
         tenant_id=None,
     )
 
-    # ==============================================================
-    # 3. LangGraph Execution Config
+    # ==========================================================
+    # 3. LangGraph Config
     #
-    # 必须包含：
+    # 必须包含 configurable.thread_id。
     #
-    #     configurable.thread_id
-    #
-    # thread_id 是：
+    # 该 thread_id 用于：
     #
     #     Checkpoint
     #     Interrupt
     #     Resume
     #     Recovery
-    #
-    # 的持久化标识。
-    # ==============================================================
+    # ==========================================================
 
     config = get_config(
         "user_001"
     )
 
-    # ==============================================================
+    # ==========================================================
     # 4. Unified Tool Registry
-    # ==============================================================
+    # ==========================================================
 
     async with create_tool_registry() as registry:
 
-        # ==========================================================
+        # ======================================================
         # 5. Permission Policy
-        # ==========================================================
+        # ======================================================
 
         permission_policy = (
             PermissionPolicy()
         )
 
-        # ==========================================================
+        # ======================================================
         # 6. Risk Policy
-        # ==============================================================
+        # ======================================================
 
         risk_policy = RiskPolicy()
 
@@ -330,16 +703,9 @@ async def main() -> None:
 
             return result.requires_approval
 
-        # ==========================================================
+        # ======================================================
         # 7. Tool-level Human-in-the-Loop
-        #
-        # 注意：
-        #
-        # 这是 Tool-level HITL。
-        #
-        # 与 workflow/nodes/human_review.py
-        # 的 Workflow-level Recovery HITL 不同。
-        # ==============================================================
+        # ======================================================
 
         human_in_the_loop = (
             HumanInTheLoopMiddleware(
@@ -357,16 +723,16 @@ async def main() -> None:
             )
         )
 
-        # ==========================================================
+        # ======================================================
         # 8. Shared Middleware
         #
-        # DynamicToolMiddleware 不放这里。
+        # DynamicToolMiddleware 不在这里。
         #
-        # 每个 Specialist：
+        # 每个 Specialist 自己创建：
         #
         #     DynamicToolMiddleware
         #         ↓
-        #     shared middleware
+        #     Shared Middleware
         #
         # Tool Error 位于 Tool Retry 外层：
         #
@@ -375,7 +741,7 @@ async def main() -> None:
         #     ToolRetry
         #         ↓
         #        Tool
-        # ==============================================================
+        # ======================================================
 
         agent_middleware = [
             LoggingMiddleware(),
@@ -391,15 +757,16 @@ async def main() -> None:
             retry_model_async,
         ]
 
-        # ==========================================================
+        # ======================================================
         # 9. Long-term Memory
-        # ==============================================================
+        # ======================================================
 
         memory_database_url = os.getenv(
             "MEMORY_DATABASE_URL"
         )
 
         if not memory_database_url:
+
             raise ValueError(
                 "MEMORY_DATABASE_URL is not configured."
             )
@@ -428,17 +795,19 @@ async def main() -> None:
 
         await memory_manager.initialize()
 
-        # ==========================================================
+        # ======================================================
         # 10. LangGraph PostgreSQL Checkpointer
-        # ==============================================================
+        # ======================================================
 
         langgraph_database_url = os.getenv(
             "LANGGRAPH_DATABASE_URL"
         )
 
         if not langgraph_database_url:
+
             raise ValueError(
-                "LANGGRAPH_DATABASE_URL is not configured."
+                "LANGGRAPH_DATABASE_URL "
+                "is not configured."
             )
 
         async with AsyncPostgresSaver.from_conn_string(
@@ -447,9 +816,9 @@ async def main() -> None:
 
             await checkpointer.setup()
 
-            # ======================================================
+            # ==================================================
             # 11. Build Enterprise Graph
-            # ======================================================
+            # ==================================================
 
             graph = build_enterprise_graph(
                 model=model,
@@ -460,14 +829,15 @@ async def main() -> None:
                 checkpointer=checkpointer,
             )
 
-            # ======================================================
+            # ==================================================
             # 12. Initial Graph State
-            # ======================================================
+            # ==================================================
 
             initial_state = {
-                # --------------------------------------------------
+
+                # ------------------------------------------------
                 # Conversation
-                # --------------------------------------------------
+                # ------------------------------------------------
 
                 "messages": [
                     HumanMessage(
@@ -481,9 +851,9 @@ async def main() -> None:
                     )
                 ],
 
-                # --------------------------------------------------
+                # ------------------------------------------------
                 # Long-term Memory
-                # --------------------------------------------------
+                # ------------------------------------------------
 
                 "retrieved_memories": [],
 
@@ -493,9 +863,9 @@ async def main() -> None:
 
                 "memory_persist_reason": None,
 
-                # --------------------------------------------------
+                # ------------------------------------------------
                 # Agent / Workflow
-                # --------------------------------------------------
+                # ------------------------------------------------
 
                 "current_agent": None,
 
@@ -503,29 +873,29 @@ async def main() -> None:
 
                 "task_status": "running",
 
-                # --------------------------------------------------
+                # ------------------------------------------------
                 # Routing / Handoff
-                # --------------------------------------------------
+                # ------------------------------------------------
 
                 "handoff_reason": None,
 
-                # --------------------------------------------------
+                # ------------------------------------------------
                 # Tool Results
-                # --------------------------------------------------
+                # ------------------------------------------------
 
                 "tool_results": [],
 
-                # --------------------------------------------------
+                # ------------------------------------------------
                 # HITL
-                # --------------------------------------------------
+                # ------------------------------------------------
 
                 "approval_required": False,
 
                 "approval_status": None,
 
-                # --------------------------------------------------
+                # ------------------------------------------------
                 # Error
-                # --------------------------------------------------
+                # ------------------------------------------------
 
                 "error": None,
 
@@ -533,9 +903,9 @@ async def main() -> None:
 
                 "last_failed_tool": None,
 
-                # --------------------------------------------------
-                # Workflow Recovery
-                # --------------------------------------------------
+                # ------------------------------------------------
+                # Recovery
+                # ------------------------------------------------
 
                 "recovery_attempts": 0,
 
@@ -545,23 +915,18 @@ async def main() -> None:
 
                 "resume_required": False,
 
-                # --------------------------------------------------
-                # Final Answer
-                # --------------------------------------------------
+                # ------------------------------------------------
+                # Finalization
+                # ------------------------------------------------
 
                 "final_answer": None,
+
+                "execution_summary": {},
             }
 
-            # ======================================================
+            # ==================================================
             # 13. Initial Workflow Execution
-            #
-            # version="v2":
-            #
-            #     response.value
-            #     response.interrupts
-            #
-            # 当前 LangGraph 推荐的类型安全接口。
-            # ==============================================================
+            # ==================================================
 
             response = await graph.ainvoke(
                 initial_state,
@@ -570,199 +935,54 @@ async def main() -> None:
                 version="v2",
             )
 
-            # ======================================================
-            # 14. Workflow-level Human Review
-            # ==============================================================
+            # ==================================================
+            # 14. HITL Handling
+            #
+            # 统一处理：
+            #
+            #     Tool-level HITL
+            #     Workflow-level Recovery HITL
+            #
+            # 当前本地使用 input() 模拟人工决策。
+            # ==================================================
 
             if response.interrupts:
 
-                interrupt_value = (
-                    response.interrupts[0].value
+                response = await _resume_tool_hitl(
+                    graph=graph,
+                    response=response,
+                    config=config,
+                    context=context,
                 )
 
-                print(
-                    "\n========== Workflow Interrupted =========="
-                )
-
-                print(
-                    "Interrupt:",
-                    interrupt_value,
-                )
-
-                # --------------------------------------------------
-                # 当前用于本地端到端测试。
-                #
-                # 真实生产环境这里应该：
-                #
-                #     返回 API
-                #         ↓
-                #     前端展示
-                #         ↓
-                #     用户决定
-                #         ↓
-                #     /resume API
-                #         ↓
-                #     Command(resume=...)
-                #
-                # 当前先用 input() 模拟人工决策。
-                # --------------------------------------------------
-
-                if (
-                    isinstance(
-                        interrupt_value,
-                        dict,
-                    )
-                    and interrupt_value.get(
-                        "type"
-                    )
-                    == "workflow_recovery_review"
-                ):
-
-                    while True:
-
-                        decision = input(
-                            "\nRecovery decision "
-                            "[retry/reroute/reject]: "
-                        ).strip().lower()
-
-                        if decision in {
-                            "retry",
-                            "reroute",
-                            "reject",
-                        }:
-                            break
-
-                        print(
-                            "Invalid decision. "
-                            "Please enter retry, "
-                            "reroute, or reject."
-                        )
-
-                    # ------------------------------------------------
-                    # Resume the SAME thread.
-                    #
-                    # Command(resume=...)
-                    # 会成为 interrupt() 的返回值。
-                    # ------------------------------------------------
-
-                    response = await graph.ainvoke(
-                        Command(
-                            resume={
-                                "action": decision,
-                            }
-                        ),
-                        config=config,
-                        context=context,
-                        version="v2",
-                    )
-
-                    # ------------------------------------------------
-                    # 如果恢复后又触发新的 Workflow-level interrupt，
-                    # 可以继续处理。
-                    #
-                    # 当前示例只处理一次。
-                    # ------------------------------------------------
-
-                    while response.interrupts:
-
-                        interrupt_value = (
-                            response.interrupts[0].value
-                        )
-
-                        print(
-                            "\n========== "
-                            "Workflow Interrupted Again "
-                            "=========="
-                        )
-
-                        print(
-                            "Interrupt:",
-                            interrupt_value,
-                        )
-
-                        if not (
-                            isinstance(
-                                interrupt_value,
-                                dict,
-                            )
-                            and interrupt_value.get(
-                                "type"
-                            )
-                            == "workflow_recovery_review"
-                        ):
-                            print(
-                                "Received a non-recovery "
-                                "interrupt. "
-                                "External HITL handling "
-                                "is required."
-                            )
-                            return
-
-                        decision = input(
-                            "\nRecovery decision "
-                            "[retry/reroute/reject]: "
-                        ).strip().lower()
-
-                        if decision not in {
-                            "retry",
-                            "reroute",
-                            "reject",
-                        }:
-                            print(
-                                "Invalid decision."
-                            )
-                            continue
-
-                        response = await graph.ainvoke(
-                            Command(
-                                resume={
-                                    "action": decision,
-                                }
-                            ),
-                            config=config,
-                            context=context,
-                            version="v2",
-                        )
-
-                else:
-                    # ------------------------------------------------
-                    # Tool-level HITL
-                    #
-                    # HumanInTheLoopMiddleware 产生的 interrupt
-                    # 使用自己的 decision schema。
-                    #
-                    # 此处暂不自动处理。
-                    # ------------------------------------------------
-
-                    print(
-                        "This is a Tool-level HITL interrupt."
-                    )
-
-                    print(
-                        "Use the HumanInTheLoopMiddleware "
-                        "decision schema to resume it."
-                    )
-
-                    return
-
-            # ======================================================
+            # ==================================================
             # 15. Final Graph State
             #
-            # version="v2" → response.value
-            # ==============================================================
+            # version="v2":
+            #
+            #     response.value
+            # ==================================================
 
             final_state = response.value
+
+            # ==================================================
+            # 16. Print Result
+            # ==================================================
 
             _print_workflow_result(
                 final_state
             )
 
-        # ==========================================================
-        # 16. Cleanup Long-term Memory
-        # ==========================================================
+        # ======================================================
+        # 17. Cleanup Memory Manager
+        # ======================================================
 
         await memory_manager.close()
 
+
+# ==============================================================
+# Entry Point
+# ==============================================================
 
 if __name__ == "__main__":
     asyncio.run(

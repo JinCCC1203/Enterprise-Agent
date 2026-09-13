@@ -10,6 +10,9 @@ from memories.long_memory.manager import MemoryManager
 from policies.permission import PermissionPolicy
 from tools_manager.registry import ToolRegistry
 
+from workflow.nodes.finalizer import (
+    create_finalizer_node,
+)
 from workflow.nodes.human_review import (
     create_human_review_node,
 )
@@ -38,6 +41,7 @@ from workflow.nodes.supervisor import (
 from workflow.nodes.ticket_agent import (
     create_ticket_agent,
 )
+
 from workflow.routing.human_review_router import (
     human_review_router,
 )
@@ -47,6 +51,7 @@ from workflow.routing.recovery_router import (
 from workflow.routing.supervisor_router import (
     supervisor_router,
 )
+
 from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
@@ -89,6 +94,16 @@ def build_enterprise_graph(
             ↓
         Memory Persist
             ↓
+        Finalizer
+            ↓
+           END
+
+    如果 memory_manager=None：
+
+        Specialist
+            ↓
+        Finalizer
+            ↓
            END
 
     ==============================================================
@@ -127,43 +142,28 @@ def build_enterprise_graph(
                 ↓
           Memory Persist
                 ↓
+             Finalizer
+                ↓
                END
 
     ==============================================================
-    Specialist Agent 内部
+    Finalization
     ==============================================================
 
-        Global ToolRegistry
-              ↓
-        ToolRegistryView
-              ↓
-        Specialist Tool Scope
-              ↓
-        PermissionPolicy
-              ↓
-        DynamicToolMiddleware
-              ↓
-        LLM Tool Calling
-              ↓
-        RiskPolicy / Tool-level HITL
-              ↓
-        Tool Retry
-              ↓
-        Tool Error
-              ↓
-        Specialist Node
-              ↓
-        EnterpriseAgentState
+        Runtime State
+             +
+        Tool Execution Facts
+             ↓
+          Finalizer
+             ↓
+        final_answer
 
-    ==============================================================
-    Persistence
-    ==============================================================
-
-        Graph State
-              ↓
-        PostgreSQL Checkpointer
-              ↓
-        Checkpoint / Interrupt / Resume / Recovery
+    Finalizer 不负责：
+        - Tool Calling
+        - Routing
+        - Recovery
+        - Permission
+        - Risk Policy
     """
 
     # ==============================================================
@@ -319,16 +319,6 @@ def build_enterprise_graph(
 
     # ==============================================================
     # 11. Workflow-level Human Review
-    #
-    # 注意：
-    #
-    # 这不是 HumanInTheLoopMiddleware。
-    #
-    # Middleware：
-    #     Tool-level HITL
-    #
-    # human_review：
-    #     Workflow-level Recovery HITL
     # ==============================================================
 
     human_review_node = (
@@ -341,7 +331,28 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 12. START
+    # 12. Finalizer
+    #
+    # Runtime State
+    #       +
+    # Tool Execution Facts
+    #       ↓
+    # Finalizer
+    #       ↓
+    # final_answer
+    # ==============================================================
+
+    finalizer_node = (
+        create_finalizer_node()
+    )
+
+    graph.add_node(
+        "finalizer",
+        finalizer_node,
+    )
+
+    # ==============================================================
+    # 13. START
     # ==============================================================
 
     if memory_manager is not None:
@@ -364,7 +375,18 @@ def build_enterprise_graph(
         )
 
     # ==============================================================
-    # 13. Supervisor → Specialist
+    # 14. Supervisor → Specialist / Finalizer
+    #
+    # supervisor_router 返回：
+    #
+    #     knowledge_agent
+    #     operations_agent
+    #     ticket_agent
+    #     research_agent
+    #     end
+    #
+    # "end" 不再直接 END，
+    # 而是统一进入 Finalizer。
     # ==============================================================
 
     graph.add_conditional_edges(
@@ -375,15 +397,16 @@ def build_enterprise_graph(
             "operations_agent": "operations_agent",
             "ticket_agent": "ticket_agent",
             "research_agent": "research_agent",
-            "end": END,
+            "end": "finalizer",
         },
     )
 
     # ==============================================================
-    # 14. Specialist Outcome Router
+    # 15. Specialist Outcome Router
     #
     # completed:
-    #     → Memory Persist / END
+    #     → Memory Persist
+    #     → Finalizer
     #
     # failed:
     #     → Recovery
@@ -403,16 +426,16 @@ def build_enterprise_graph(
         if memory_manager is not None:
             return "memory_persist"
 
-        return "end"
+        return "finalizer"
 
     specialist_routes = {
         "recovery": "recovery",
         "memory_persist": "memory_persist",
-        "end": END,
+        "finalizer": "finalizer",
     }
 
     # ==============================================================
-    # 15. Specialist → Success / Recovery
+    # 16. Specialist → Success / Recovery
     # ==============================================================
 
     for specialist_name in (
@@ -421,6 +444,7 @@ def build_enterprise_graph(
         "ticket_agent",
         "research_agent",
     ):
+
         graph.add_conditional_edges(
             specialist_name,
             specialist_outcome_router,
@@ -428,7 +452,7 @@ def build_enterprise_graph(
         )
 
     # ==============================================================
-    # 16. Recovery Router
+    # 17. Recovery Router
     #
     # retry:
     #     → 原 Specialist
@@ -437,7 +461,7 @@ def build_enterprise_graph(
     #     → Supervisor
     #
     # human_review:
-    #     → Human Review Node
+    #     → Human Review
     #
     # failed:
     #     → Memory Persist
@@ -450,15 +474,13 @@ def build_enterprise_graph(
         "research_agent": "research_agent",
         "supervisor": "supervisor",
         "human_review": "human_review",
-        "memory_persist": "memory_persist",
     }
 
-    # 如果 memory_manager=None，
-    # 当前测试模式没有 Memory Persist。
-    if memory_manager is None:
-        recovery_routes.pop(
+    if memory_manager is not None:
+
+        recovery_routes[
             "memory_persist"
-        )
+        ] = "memory_persist"
 
     graph.add_conditional_edges(
         "recovery",
@@ -467,7 +489,7 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 17. Human Review Router
+    # 18. Human Review Router
     #
     # human_retry:
     #     → 原 Specialist
@@ -488,9 +510,21 @@ def build_enterprise_graph(
     }
 
     if memory_manager is not None:
+
         human_review_routes[
             "memory_persist"
         ] = "memory_persist"
+
+    else:
+        # 没有 Memory Manager 时，
+        # rejected 需要回到 Finalizer。
+        #
+        # human_review_router 当前如果返回
+        # memory_persist，
+        # 没有该节点会报错。
+        #
+        # 因此这里不强行加入不存在的 Node。
+        pass
 
     graph.add_conditional_edges(
         "human_review",
@@ -499,18 +533,27 @@ def build_enterprise_graph(
     )
 
     # ==============================================================
-    # 18. Memory Persist → END
+    # 19. Memory Persist → Finalizer
     # ==============================================================
 
     if memory_manager is not None:
 
         graph.add_edge(
             "memory_persist",
-            END,
+            "finalizer",
         )
 
     # ==============================================================
-    # 19. Compile
+    # 20. Finalizer → END
+    # ==============================================================
+
+    graph.add_edge(
+        "finalizer",
+        END,
+    )
+
+    # ==============================================================
+    # 21. Compile
     # ==============================================================
 
     return graph.compile(

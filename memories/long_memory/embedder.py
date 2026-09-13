@@ -29,21 +29,26 @@ class MemoryEmbedder:
 
     # Embed Document / Memory
     def embed_memory(
-        self,
-        content: str,
+            self,
+            content: str,
     ) -> list[float]:
-        """
-        将一条 Memory Content 转换为 embedding。
-        """
 
         if not content.strip():
             raise ValueError(
                 "memory content cannot be empty"
             )
 
-        embedding = self.embeddings.embed_documents(
-            content
+        embeddings = self.embeddings.embed_documents(
+            [content]
         )
+
+        if len(embeddings) != 1:
+            raise ValueError(
+                "Expected exactly one embedding, "
+                f"got {len(embeddings)}"
+            )
+
+        embedding = embeddings[0]
 
         self._validate_embedding(embedding)
 

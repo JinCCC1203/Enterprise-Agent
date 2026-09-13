@@ -221,9 +221,26 @@ class EnterpriseAgentState(TypedDict, total=False):
     # 恢复当前 Workflow。
     resume_required: bool
 
+
     # ==============================================================
-    # Final Output
+    # Finalization
     # ==============================================================
 
-    # 当前 Workflow 最终生成的回答。
+    """
+    Finalizer 生成的最终用户答案。
+    """
+
     final_answer: str | None
+
+    """
+    最终执行事实摘要。
+
+    供：
+        - Finalizer
+        - API
+        - Logging
+        - Audit
+        - UI
+    """
+
+    execution_summary: dict[str, Any]

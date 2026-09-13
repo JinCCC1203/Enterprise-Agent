@@ -23,6 +23,10 @@ from workflow.utils.execution_errors import (
     extract_tool_execution_error,
 )
 
+from workflow.utils.execution_facts import (
+    collect_tool_results,
+)
+
 
 KNOWLEDGE_TOOL_SCOPE = frozenset(
     {
@@ -200,26 +204,28 @@ def create_knowledge_agent(
             new_messages
         )
 
+        tool_results = collect_tool_results(
+            result_messages
+        )
+
         if failure is not None:
             return {
                 "messages": result_messages,
-                "current_agent": "knowledge_agent",
+                "current_agent": "ticket_agent",
                 "task_status": "failed",
                 "error": failure["error"],
-                "last_failed_node": "knowledge_agent",
+                "last_failed_node": "ticket_agent",
                 "last_failed_tool": (
                     failure["last_failed_tool"]
                 ),
+                "tool_results": tool_results,
             }
-
-        # ----------------------------------------------------------
-        # Normal Completion
-        # ----------------------------------------------------------
 
         return {
             "messages": result_messages,
-            "current_agent": "knowledge_agent",
+            "current_agent": "ticket_agent",
             "task_status": "completed",
+            "tool_results": tool_results,
         }
 
     return knowledge_agent_node
