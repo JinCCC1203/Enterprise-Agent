@@ -9,12 +9,15 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.runtime import Runtime
 
-from middlewares.dynamic_tools import DynamicToolMiddleware
+from middlewares.dynamic_tools import (
+    DynamicToolMiddleware,
+)
 from policies.permission import PermissionPolicy
 from tools_manager.registry import ToolRegistry
 from tools_manager.tool_exposure import (
     PermissionBasedToolExposure,
 )
+
 from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
@@ -46,17 +49,11 @@ def create_ticket_agent(
     """
     创建 Ticket Specialist Agent。
 
-    Specialist Scope:
+    Scope:
 
         get_ticket
         create_ticket
         update_ticket
-
-    职责：
-        - 查询工单
-        - 创建工单
-        - 更新工单
-        - 工单生命周期处理
     """
 
     # ==============================================================
@@ -71,9 +68,11 @@ def create_ticket_agent(
     # 2. Tool Exposure
     # ==============================================================
 
-    tool_exposure = PermissionBasedToolExposure(
-        registry_view=registry_view,
-        permission_policy=permission_policy,
+    tool_exposure = (
+        PermissionBasedToolExposure(
+            registry_view=registry_view,
+            permission_policy=permission_policy,
+        )
     )
 
     # ==============================================================
@@ -86,7 +85,7 @@ def create_ticket_agent(
     )
 
     # ==============================================================
-    # 4. Middleware Assembly
+    # 4. Middleware
     # ==============================================================
 
     agent_middleware = [
@@ -122,9 +121,6 @@ def create_ticket_agent(
         runtime: Runtime[EnterpriseAgentContext],
         config: RunnableConfig,
     ) -> dict[str, Any]:
-        """
-        Ticket Specialist Graph Node。
-        """
 
         messages = state.get(
             "messages",
@@ -136,8 +132,10 @@ def create_ticket_agent(
             [],
         )
 
-        memory_context = _build_memory_context(
-            retrieved_memories
+        memory_context = (
+            _build_memory_context(
+                retrieved_memories
+            )
         )
 
         agent_messages = list(
@@ -145,12 +143,17 @@ def create_ticket_agent(
         )
 
         if memory_context:
+
             agent_messages.insert(
                 0,
                 HumanMessage(
                     content=memory_context
                 ),
             )
+
+        # ----------------------------------------------------------
+        # Agent Runtime
+        # ----------------------------------------------------------
 
         result = await agent.ainvoke(
             {
@@ -165,35 +168,61 @@ def create_ticket_agent(
             [],
         )
 
-        # 只检查当前 invocation 新增的消息。
+        # ----------------------------------------------------------
+        # 只检查当前 invocation 新消息
+        # ----------------------------------------------------------
+
         new_messages = result_messages[
             len(agent_messages):
         ]
 
-        failure = extract_tool_execution_error(
-            new_messages
+        failure = (
+            extract_tool_execution_error(
+                new_messages
+            )
         )
 
-        tool_results = collect_tool_results(
-            result_messages
+        tool_results = (
+            collect_tool_results(
+                result_messages
+            )
         )
+
+        # ----------------------------------------------------------
+        # Failure
+        # ----------------------------------------------------------
 
         if failure is not None:
+
             return {
                 "messages": result_messages,
-                "current_agent": "ticket_agent",
+                "current_agent": (
+                    "ticket_agent"
+                ),
                 "task_status": "failed",
-                "error": failure["error"],
-                "last_failed_node": "ticket_agent",
+                "error": failure[
+                    "error"
+                ],
+                "last_failed_node": (
+                    "ticket_agent"
+                ),
                 "last_failed_tool": (
-                    failure["last_failed_tool"]
+                    failure[
+                        "last_failed_tool"
+                    ]
                 ),
                 "tool_results": tool_results,
             }
 
+        # ----------------------------------------------------------
+        # Success
+        # ----------------------------------------------------------
+
         return {
             "messages": result_messages,
-            "current_agent": "ticket_agent",
+            "current_agent": (
+                "ticket_agent"
+            ),
             "task_status": "completed",
             "tool_results": tool_results,
         }
@@ -213,9 +242,8 @@ def _build_memory_context(
         get_ticket
     是权威来源。
 
-    对 create/update：
-        必须依据当前任务以及 Tool Result，
-        不能只根据历史 Memory 执行写操作。
+    create/update：
+        必须依据当前任务和当前 Tool Result。
     """
 
     if not memories:

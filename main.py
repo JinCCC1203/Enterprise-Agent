@@ -86,7 +86,7 @@ if sys.platform == "win32":
 
 
 # ==============================================================
-# Workflow Result Printer
+# Workflow Result
 # ==============================================================
 
 def _print_workflow_result(
@@ -95,10 +95,13 @@ def _print_workflow_result(
     """
     打印最终 Workflow State。
 
-    注意：
+    最终用户答案只能来自：
 
-    final_answer 不再从 messages[-1] 推断，
-    而是由 Finalizer Node 根据 Runtime State 生成。
+        state["final_answer"]
+
+    不再直接使用：
+
+        messages[-1]
     """
 
     print(
@@ -257,7 +260,7 @@ def _print_workflow_result(
     )
 
     # ----------------------------------------------------------
-    # Runtime Execution Truth
+    # Execution Truth
     # ----------------------------------------------------------
 
     print(
@@ -289,12 +292,12 @@ def _print_workflow_result(
         )
     else:
         print(
-            "Agent 未生成最终回答。"
+            "Workflow 已结束，但 Finalizer 未生成最终回答。"
         )
 
 
 # ==============================================================
-# Tool-level HITL
+# Tool-level HITL Resume
 # ==============================================================
 
 async def _resume_tool_hitl(
@@ -305,11 +308,19 @@ async def _resume_tool_hitl(
     context: EnterpriseAgentContext,
 ) -> Any:
     """
-    处理 HumanInTheLoopMiddleware 产生的 Tool-level HITL。
+    处理 Tool-level HITL。
 
-    当前本地测试使用 input() 模拟人工审批。
+    本地测试：
 
-    生产环境中应该由：
+        interrupt
+            ↓
+        input()
+            ↓
+        Command(resume=...)
+            ↓
+        同一个 thread_id resume
+
+    生产环境：
 
         API
           ↓
@@ -317,7 +328,7 @@ async def _resume_tool_hitl(
           ↓
         Human Decision
           ↓
-        Command(resume=...)
+        /resume API
     """
 
     while response.interrupts:
@@ -335,9 +346,9 @@ async def _resume_tool_hitl(
             interrupt_value,
         )
 
-        # ------------------------------------------------------
+        # ======================================================
         # Workflow-level Recovery HITL
-        # ------------------------------------------------------
+        # ======================================================
 
         if (
             isinstance(
@@ -371,7 +382,11 @@ async def _resume_tool_hitl(
                 )
 
             # --------------------------------------------------
-            # Resume Workflow-level HITL
+            # Workflow Recovery Resume
+            #
+            # 注意：
+            # approval_status 不应该被当作 Recovery
+            # 的审批状态，所以这里不修改 approval_status。
             # --------------------------------------------------
 
             response = await graph.ainvoke(
@@ -380,14 +395,8 @@ async def _resume_tool_hitl(
                         "action": decision,
                     },
                     update={
-                        "approval_required": True,
-                        "approval_status": (
-                            "approved"
-                            if decision == "retry"
-                            else "edited"
-                            if decision == "reroute"
-                            else "rejected"
-                        ),
+                        "resume_required": False,
+                        "task_status": "running",
                     },
                 ),
                 config=config,
@@ -397,9 +406,9 @@ async def _resume_tool_hitl(
 
             continue
 
-        # ------------------------------------------------------
+        # ======================================================
         # Tool-level HITL
-        # ------------------------------------------------------
+        # ======================================================
 
         print(
             "\nThis is a Tool-level HITL interrupt."
@@ -439,7 +448,7 @@ async def _resume_tool_hitl(
             return response
 
         # ------------------------------------------------------
-        # Display approval requests
+        # Display Tool Approval
         # ------------------------------------------------------
 
         print(
@@ -490,7 +499,7 @@ async def _resume_tool_hitl(
                 )
 
         # ------------------------------------------------------
-        # Human decision
+        # Human Decision
         # ------------------------------------------------------
 
         while True:
@@ -513,9 +522,9 @@ async def _resume_tool_hitl(
                 "edit, or reject."
             )
 
-        # ------------------------------------------------------
+        # ======================================================
         # Approve
-        # ------------------------------------------------------
+        # ======================================================
 
         if decision == "approve":
 
@@ -530,9 +539,9 @@ async def _resume_tool_hitl(
                 "approved"
             )
 
-        # ------------------------------------------------------
+        # ======================================================
         # Reject
-        # ------------------------------------------------------
+        # ======================================================
 
         elif decision == "reject":
 
@@ -547,14 +556,12 @@ async def _resume_tool_hitl(
                 "rejected"
             )
 
-        # ------------------------------------------------------
+        # ======================================================
         # Edit
         #
-        # 当前版本先保留原参数，
-        # 用于验证 edit → resume 链路。
-        #
-        # 后续可增加逐字段编辑。
-        # ------------------------------------------------------
+        # 当前仍使用原 args 验证 edit resume 链路。
+        # 后续再扩展成交互式编辑。
+        # ======================================================
 
         else:
 
@@ -575,27 +582,25 @@ async def _resume_tool_hitl(
                     current_args
                 )
 
-                edited_decision = {
-                    "type": "edit",
-                    "edited_action": {
-                        "name": action.get(
-                            "name"
-                        ),
-                        "args": current_args,
-                    },
-                }
-
                 decisions.append(
-                    edited_decision
+                    {
+                        "type": "edit",
+                        "edited_action": {
+                            "name": action.get(
+                                "name"
+                            ),
+                            "args": current_args,
+                        },
+                    }
                 )
 
             approval_status = (
                 "edited"
             )
 
-        # ------------------------------------------------------
+        # ======================================================
         # Resume SAME thread
-        # ------------------------------------------------------
+        # ======================================================
 
         response = await graph.ainvoke(
             Command(
@@ -631,7 +636,6 @@ async def main() -> None:
     )
 
     if not deepseek_api_key:
-
         raise ValueError(
             "DEEPSEEK_API_KEY is not configured."
         )
@@ -654,16 +658,7 @@ async def main() -> None:
     )
 
     # ==========================================================
-    # 3. LangGraph Config
-    #
-    # 必须包含 configurable.thread_id。
-    #
-    # 该 thread_id 用于：
-    #
-    #     Checkpoint
-    #     Interrupt
-    #     Resume
-    #     Recovery
+    # 3. Execution Config
     # ==========================================================
 
     config = get_config(
@@ -671,7 +666,7 @@ async def main() -> None:
     )
 
     # ==========================================================
-    # 4. Unified Tool Registry
+    # 4. Tool Registry
     # ==========================================================
 
     async with create_tool_registry() as registry:
@@ -704,7 +699,7 @@ async def main() -> None:
             return result.requires_approval
 
         # ======================================================
-        # 7. Tool-level Human-in-the-Loop
+        # 7. Tool-level HITL
         # ======================================================
 
         human_in_the_loop = (
@@ -726,34 +721,25 @@ async def main() -> None:
         # ======================================================
         # 8. Shared Middleware
         #
-        # DynamicToolMiddleware 不在这里。
-        #
-        # 每个 Specialist 自己创建：
-        #
         #     DynamicToolMiddleware
-        #         ↓
-        #     Shared Middleware
-        #
-        # Tool Error 位于 Tool Retry 外层：
-        #
+        #            ↓
+        #     Logging / PII
+        #            ↓
+        #     Tool HITL
+        #            ↓
         #     ToolError
-        #         ↓
+        #            ↓
         #     ToolRetry
-        #         ↓
+        #            ↓
         #        Tool
         # ======================================================
 
         agent_middleware = [
             LoggingMiddleware(),
-
             *create_pii_middlewares(),
-
             human_in_the_loop,
-
             tool_error_async,
-
             retry_tool_async,
-
             retry_model_async,
         ]
 
@@ -766,7 +752,6 @@ async def main() -> None:
         )
 
         if not memory_database_url:
-
             raise ValueError(
                 "MEMORY_DATABASE_URL is not configured."
             )
@@ -796,7 +781,7 @@ async def main() -> None:
         await memory_manager.initialize()
 
         # ======================================================
-        # 10. LangGraph PostgreSQL Checkpointer
+        # 10. PostgreSQL Checkpointer
         # ======================================================
 
         langgraph_database_url = os.getenv(
@@ -804,10 +789,8 @@ async def main() -> None:
         )
 
         if not langgraph_database_url:
-
             raise ValueError(
-                "LANGGRAPH_DATABASE_URL "
-                "is not configured."
+                "LANGGRAPH_DATABASE_URL is not configured."
             )
 
         async with AsyncPostgresSaver.from_conn_string(
@@ -817,7 +800,7 @@ async def main() -> None:
             await checkpointer.setup()
 
             # ==================================================
-            # 11. Build Enterprise Graph
+            # 11. Build Graph
             # ==================================================
 
             graph = build_enterprise_graph(
@@ -830,11 +813,10 @@ async def main() -> None:
             )
 
             # ==================================================
-            # 12. Initial Graph State
+            # 12. Initial State
             # ==================================================
 
             initial_state = {
-
                 # ------------------------------------------------
                 # Conversation
                 # ------------------------------------------------
@@ -852,7 +834,7 @@ async def main() -> None:
                 ],
 
                 # ------------------------------------------------
-                # Long-term Memory
+                # Memory
                 # ------------------------------------------------
 
                 "retrieved_memories": [],
@@ -874,13 +856,13 @@ async def main() -> None:
                 "task_status": "running",
 
                 # ------------------------------------------------
-                # Routing / Handoff
+                # Routing
                 # ------------------------------------------------
 
                 "handoff_reason": None,
 
                 # ------------------------------------------------
-                # Tool Results
+                # Tool
                 # ------------------------------------------------
 
                 "tool_results": [],
@@ -916,7 +898,7 @@ async def main() -> None:
                 "resume_required": False,
 
                 # ------------------------------------------------
-                # Finalization
+                # Finalizer
                 # ------------------------------------------------
 
                 "final_answer": None,
@@ -925,7 +907,7 @@ async def main() -> None:
             }
 
             # ==================================================
-            # 13. Initial Workflow Execution
+            # 13. Initial Run
             # ==================================================
 
             response = await graph.ainvoke(
@@ -936,14 +918,7 @@ async def main() -> None:
             )
 
             # ==================================================
-            # 14. HITL Handling
-            #
-            # 统一处理：
-            #
-            #     Tool-level HITL
-            #     Workflow-level Recovery HITL
-            #
-            # 当前本地使用 input() 模拟人工决策。
+            # 14. HITL Resume
             # ==================================================
 
             if response.interrupts:
@@ -956,17 +931,13 @@ async def main() -> None:
                 )
 
             # ==================================================
-            # 15. Final Graph State
-            #
-            # version="v2":
-            #
-            #     response.value
+            # 15. Final State
             # ==================================================
 
             final_state = response.value
 
             # ==================================================
-            # 16. Print Result
+            # 16. Print
             # ==================================================
 
             _print_workflow_result(
@@ -974,15 +945,11 @@ async def main() -> None:
             )
 
         # ======================================================
-        # 17. Cleanup Memory Manager
+        # 17. Cleanup
         # ======================================================
 
         await memory_manager.close()
 
-
-# ==============================================================
-# Entry Point
-# ==============================================================
 
 if __name__ == "__main__":
     asyncio.run(

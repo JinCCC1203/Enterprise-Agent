@@ -120,8 +120,6 @@ def build_enterprise_graph(
           ├── reroute
           │     ↓
           │   Supervisor
-          │     ↓
-          │   LLM 重新规划
           │
           ├── human_review
           │     ↓
@@ -132,11 +130,6 @@ def build_enterprise_graph(
           │   Checkpoint
           │     ↓
           │   Command(resume)
-          │     ↓
-          │   Human Review Router
-          │     ├── retry
-          │     ├── reroute
-          │     └── reject
           │
           └── failed
                 ↓
@@ -157,13 +150,6 @@ def build_enterprise_graph(
           Finalizer
              ↓
         final_answer
-
-    Finalizer 不负责：
-        - Tool Calling
-        - Routing
-        - Recovery
-        - Permission
-        - Risk Policy
     """
 
     # ==============================================================
@@ -177,11 +163,6 @@ def build_enterprise_graph(
 
     # ==============================================================
     # 2. Shared Middleware
-    #
-    # DynamicToolMiddleware 不放这里。
-    #
-    # 每个 Specialist 根据自己的 ToolRegistryView
-    # 创建自己的 DynamicToolMiddleware。
     # ==============================================================
 
     shared_middleware = list(
@@ -332,14 +313,6 @@ def build_enterprise_graph(
 
     # ==============================================================
     # 12. Finalizer
-    #
-    # Runtime State
-    #       +
-    # Tool Execution Facts
-    #       ↓
-    # Finalizer
-    #       ↓
-    # final_answer
     # ==============================================================
 
     finalizer_node = (
@@ -376,17 +349,6 @@ def build_enterprise_graph(
 
     # ==============================================================
     # 14. Supervisor → Specialist / Finalizer
-    #
-    # supervisor_router 返回：
-    #
-    #     knowledge_agent
-    #     operations_agent
-    #     ticket_agent
-    #     research_agent
-    #     end
-    #
-    # "end" 不再直接 END，
-    # 而是统一进入 Finalizer。
     # ==============================================================
 
     graph.add_conditional_edges(
@@ -404,12 +366,14 @@ def build_enterprise_graph(
     # ==============================================================
     # 15. Specialist Outcome Router
     #
-    # completed:
-    #     → Memory Persist
-    #     → Finalizer
-    #
     # failed:
     #     → Recovery
+    #
+    # completed + memory:
+    #     → Memory Persist
+    #
+    # completed + no memory:
+    #     → Finalizer
     # ==============================================================
 
     def specialist_outcome_router(
@@ -444,7 +408,6 @@ def build_enterprise_graph(
         "ticket_agent",
         "research_agent",
     ):
-
         graph.add_conditional_edges(
             specialist_name,
             specialist_outcome_router,
@@ -482,6 +445,12 @@ def build_enterprise_graph(
             "memory_persist"
         ] = "memory_persist"
 
+    else:
+
+        recovery_routes[
+            "memory_persist"
+        ] = "finalizer"
+
     graph.add_conditional_edges(
         "recovery",
         recovery_router,
@@ -498,7 +467,7 @@ def build_enterprise_graph(
     #     → Supervisor
     #
     # human_rejected:
-    #     → Memory Persist
+    #     → Memory Persist / Finalizer
     # ==============================================================
 
     human_review_routes: dict[str, str] = {
@@ -516,15 +485,10 @@ def build_enterprise_graph(
         ] = "memory_persist"
 
     else:
-        # 没有 Memory Manager 时，
-        # rejected 需要回到 Finalizer。
-        #
-        # human_review_router 当前如果返回
-        # memory_persist，
-        # 没有该节点会报错。
-        #
-        # 因此这里不强行加入不存在的 Node。
-        pass
+
+        human_review_routes[
+            "memory_persist"
+        ] = "finalizer"
 
     graph.add_conditional_edges(
         "human_review",

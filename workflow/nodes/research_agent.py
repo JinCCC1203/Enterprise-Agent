@@ -9,12 +9,15 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.runtime import Runtime
 
-from middlewares.dynamic_tools import DynamicToolMiddleware
+from middlewares.dynamic_tools import (
+    DynamicToolMiddleware,
+)
 from policies.permission import PermissionPolicy
 from tools_manager.registry import ToolRegistry
 from tools_manager.tool_exposure import (
     PermissionBasedToolExposure,
 )
+
 from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
@@ -22,7 +25,6 @@ from workflow.state import (
 from workflow.utils.execution_errors import (
     extract_tool_execution_error,
 )
-
 from workflow.utils.execution_facts import (
     collect_tool_results,
 )
@@ -43,24 +45,10 @@ def create_research_agent(
     middleware: list[Any] | None = None,
 ):
     """
-    创建 Research / Web Specialist Agent。
+    创建 Research Specialist Agent。
 
-    Specialist Scope:
+    Scope:
         web_search
-
-    web_search 通过 MCP 接入：
-
-        Research Agent
-              ↓
-          web_search
-              ↓
-        MCP Client
-              ↓
-        MCP Server
-              ↓
-        External Search Provider
-              ↓
-           Internet
     """
 
     # ==============================================================
@@ -75,9 +63,11 @@ def create_research_agent(
     # 2. Tool Exposure
     # ==============================================================
 
-    tool_exposure = PermissionBasedToolExposure(
-        registry_view=registry_view,
-        permission_policy=permission_policy,
+    tool_exposure = (
+        PermissionBasedToolExposure(
+            registry_view=registry_view,
+            permission_policy=permission_policy,
+        )
     )
 
     # ==============================================================
@@ -90,7 +80,7 @@ def create_research_agent(
     )
 
     # ==============================================================
-    # 4. Middleware Assembly
+    # 4. Middleware
     # ==============================================================
 
     agent_middleware = [
@@ -107,20 +97,7 @@ def create_research_agent(
     )
 
     # ==============================================================
-    # 6. Validate web_search
-    # ==============================================================
-
-    if not registry_view.contains(
-        "web_search"
-    ):
-        raise RuntimeError(
-            "Research Agent requires the "
-            "'web_search' MCP tool, but it is not "
-            "available in the ToolRegistry."
-        )
-
-    # ==============================================================
-    # 7. LangChain Agent
+    # 6. LangChain Agent
     # ==============================================================
 
     agent = create_agent(
@@ -131,7 +108,7 @@ def create_research_agent(
     )
 
     # ==============================================================
-    # 8. LangGraph Node
+    # 7. LangGraph Node
     # ==============================================================
 
     async def research_agent_node(
@@ -139,9 +116,6 @@ def create_research_agent(
         runtime: Runtime[EnterpriseAgentContext],
         config: RunnableConfig,
     ) -> dict[str, Any]:
-        """
-        Research Specialist Graph Node。
-        """
 
         messages = state.get(
             "messages",
@@ -153,8 +127,10 @@ def create_research_agent(
             [],
         )
 
-        memory_context = _build_memory_context(
-            retrieved_memories
+        memory_context = (
+            _build_memory_context(
+                retrieved_memories
+            )
         )
 
         agent_messages = list(
@@ -162,12 +138,17 @@ def create_research_agent(
         )
 
         if memory_context:
+
             agent_messages.insert(
                 0,
                 HumanMessage(
                     content=memory_context
                 ),
             )
+
+        # ----------------------------------------------------------
+        # Agent Runtime
+        # ----------------------------------------------------------
 
         result = await agent.ainvoke(
             {
@@ -182,35 +163,61 @@ def create_research_agent(
             [],
         )
 
-        # 只检查当前 invocation 新增的消息。
+        # ----------------------------------------------------------
+        # 只检查当前 invocation 新增消息
+        # ----------------------------------------------------------
+
         new_messages = result_messages[
             len(agent_messages):
         ]
 
-        failure = extract_tool_execution_error(
-            new_messages
+        failure = (
+            extract_tool_execution_error(
+                new_messages
+            )
         )
 
-        tool_results = collect_tool_results(
-            result_messages
+        tool_results = (
+            collect_tool_results(
+                result_messages
+            )
         )
+
+        # ----------------------------------------------------------
+        # Failure
+        # ----------------------------------------------------------
 
         if failure is not None:
+
             return {
                 "messages": result_messages,
-                "current_agent": "ticket_agent",
+                "current_agent": (
+                    "research_agent"
+                ),
                 "task_status": "failed",
-                "error": failure["error"],
-                "last_failed_node": "ticket_agent",
+                "error": failure[
+                    "error"
+                ],
+                "last_failed_node": (
+                    "research_agent"
+                ),
                 "last_failed_tool": (
-                    failure["last_failed_tool"]
+                    failure[
+                        "last_failed_tool"
+                    ]
                 ),
                 "tool_results": tool_results,
             }
 
+        # ----------------------------------------------------------
+        # Success
+        # ----------------------------------------------------------
+
         return {
             "messages": result_messages,
-            "current_agent": "ticket_agent",
+            "current_agent": (
+                "research_agent"
+            ),
             "task_status": "completed",
             "tool_results": tool_results,
         }

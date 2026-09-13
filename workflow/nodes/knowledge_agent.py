@@ -9,12 +9,15 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.runtime import Runtime
 
-from middlewares.dynamic_tools import DynamicToolMiddleware
+from middlewares.dynamic_tools import (
+    DynamicToolMiddleware,
+)
 from policies.permission import PermissionPolicy
 from tools_manager.registry import ToolRegistry
 from tools_manager.tool_exposure import (
     PermissionBasedToolExposure,
 )
+
 from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
@@ -22,7 +25,6 @@ from workflow.state import (
 from workflow.utils.execution_errors import (
     extract_tool_execution_error,
 )
-
 from workflow.utils.execution_facts import (
     collect_tool_results,
 )
@@ -44,37 +46,6 @@ def create_knowledge_agent(
 ):
     """
     创建 Knowledge Specialist Agent。
-
-    Specialist Scope:
-        rag_search
-
-    职责：
-        - 企业知识库查询
-        - 内部文档检索
-        - RAG 问答
-        - 企业知识分析
-
-    Tool Governance：
-
-        Global ToolRegistry
-                ↓
-        ToolRegistryView
-                ↓
-        Specialist Scope
-                ↓
-        PermissionPolicy
-                ↓
-        DynamicToolMiddleware
-                ↓
-        LLM Tool Calling
-                ↓
-        RiskPolicy / HITL
-                ↓
-        Tool Retry
-                ↓
-        Tool Error
-                ↓
-        Workflow Recovery
     """
 
     # ==============================================================
@@ -89,15 +60,15 @@ def create_knowledge_agent(
     # 2. Tool Exposure
     # ==============================================================
 
-    tool_exposure = PermissionBasedToolExposure(
-        registry_view=registry_view,
-        permission_policy=permission_policy,
+    tool_exposure = (
+        PermissionBasedToolExposure(
+            registry_view=registry_view,
+            permission_policy=permission_policy,
+        )
     )
 
     # ==============================================================
     # 3. Dynamic Tool Middleware
-    #
-    # Specialist-specific middleware，放在当前 Agent middleware 最前面。
     # ==============================================================
 
     dynamic_tools = DynamicToolMiddleware(
@@ -106,7 +77,7 @@ def create_knowledge_agent(
     )
 
     # ==============================================================
-    # 4. Middleware Assembly
+    # 4. Middleware
     # ==============================================================
 
     agent_middleware = [
@@ -142,9 +113,6 @@ def create_knowledge_agent(
         runtime: Runtime[EnterpriseAgentContext],
         config: RunnableConfig,
     ) -> dict[str, Any]:
-        """
-        Knowledge Specialist Graph Node。
-        """
 
         messages = state.get(
             "messages",
@@ -156,8 +124,10 @@ def create_knowledge_agent(
             [],
         )
 
-        memory_context = _build_memory_context(
-            retrieved_memories
+        memory_context = (
+            _build_memory_context(
+                retrieved_memories
+            )
         )
 
         agent_messages = list(
@@ -165,6 +135,7 @@ def create_knowledge_agent(
         )
 
         if memory_context:
+
             agent_messages.insert(
                 0,
                 HumanMessage(
@@ -190,40 +161,60 @@ def create_knowledge_agent(
         )
 
         # ----------------------------------------------------------
-        # 只检查本次 Agent Invocation 新产生的消息
-        #
-        # 防止 Recovery retry 时，
-        # 上一轮失败留下的 ToolMessage 污染当前结果。
+        # 只检查本次 Agent Invocation 新消息
         # ----------------------------------------------------------
 
         new_messages = result_messages[
             len(agent_messages):
         ]
 
-        failure = extract_tool_execution_error(
-            new_messages
+        failure = (
+            extract_tool_execution_error(
+                new_messages
+            )
         )
 
-        tool_results = collect_tool_results(
-            result_messages
+        tool_results = (
+            collect_tool_results(
+                result_messages
+            )
         )
+
+        # ----------------------------------------------------------
+        # Failure
+        # ----------------------------------------------------------
 
         if failure is not None:
+
             return {
                 "messages": result_messages,
-                "current_agent": "ticket_agent",
+                "current_agent": (
+                    "knowledge_agent"
+                ),
                 "task_status": "failed",
-                "error": failure["error"],
-                "last_failed_node": "ticket_agent",
+                "error": failure[
+                    "error"
+                ],
+                "last_failed_node": (
+                    "knowledge_agent"
+                ),
                 "last_failed_tool": (
-                    failure["last_failed_tool"]
+                    failure[
+                        "last_failed_tool"
+                    ]
                 ),
                 "tool_results": tool_results,
             }
 
+        # ----------------------------------------------------------
+        # Success
+        # ----------------------------------------------------------
+
         return {
             "messages": result_messages,
-            "current_agent": "ticket_agent",
+            "current_agent": (
+                "knowledge_agent"
+            ),
             "task_status": "completed",
             "tool_results": tool_results,
         }
@@ -236,9 +227,6 @@ def _build_memory_context(
 ) -> str:
     """
     构造长期记忆上下文。
-
-    Long-term Memory 只是辅助上下文，
-    不能替代当前 RAG 检索结果。
     """
 
     if not memories:
@@ -253,8 +241,8 @@ def _build_memory_context(
         "Relevant long-term memories retrieved "
         "for this workflow:\n"
         f"{memory_text}\n\n"
-        "Use these memories only as contextual hints. "
-        "For enterprise knowledge questions, use the "
-        "current enterprise knowledge base through "
-        "rag_search as the authoritative source."
+        "Use these memories only as historical context. "
+        "For current enterprise knowledge or document "
+        "information, always rely on rag_search results "
+        "over historical memory."
     )

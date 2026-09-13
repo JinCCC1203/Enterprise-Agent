@@ -9,12 +9,15 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.runtime import Runtime
 
-from middlewares.dynamic_tools import DynamicToolMiddleware
+from middlewares.dynamic_tools import (
+    DynamicToolMiddleware,
+)
 from policies.permission import PermissionPolicy
 from tools_manager.registry import ToolRegistry
 from tools_manager.tool_exposure import (
     PermissionBasedToolExposure,
 )
+
 from workflow.state import (
     EnterpriseAgentContext,
     EnterpriseAgentState,
@@ -22,7 +25,6 @@ from workflow.state import (
 from workflow.utils.execution_errors import (
     extract_tool_execution_error,
 )
-
 from workflow.utils.execution_facts import (
     collect_tool_results,
 )
@@ -45,14 +47,8 @@ def create_operations_agent(
     """
     创建 Operations Specialist Agent。
 
-    Specialist Scope:
+    Scope:
         get_service_health
-
-    职责：
-        - 服务健康检查
-        - 当前服务状态
-        - 基础运维诊断
-        - 企业基础设施状态查询
     """
 
     # ==============================================================
@@ -67,9 +63,11 @@ def create_operations_agent(
     # 2. Tool Exposure
     # ==============================================================
 
-    tool_exposure = PermissionBasedToolExposure(
-        registry_view=registry_view,
-        permission_policy=permission_policy,
+    tool_exposure = (
+        PermissionBasedToolExposure(
+            registry_view=registry_view,
+            permission_policy=permission_policy,
+        )
     )
 
     # ==============================================================
@@ -82,7 +80,7 @@ def create_operations_agent(
     )
 
     # ==============================================================
-    # 4. Middleware Assembly
+    # 4. Middleware
     # ==============================================================
 
     agent_middleware = [
@@ -118,9 +116,6 @@ def create_operations_agent(
         runtime: Runtime[EnterpriseAgentContext],
         config: RunnableConfig,
     ) -> dict[str, Any]:
-        """
-        Operations Specialist Graph Node。
-        """
 
         messages = state.get(
             "messages",
@@ -132,8 +127,10 @@ def create_operations_agent(
             [],
         )
 
-        memory_context = _build_memory_context(
-            retrieved_memories
+        memory_context = (
+            _build_memory_context(
+                retrieved_memories
+            )
         )
 
         agent_messages = list(
@@ -141,12 +138,17 @@ def create_operations_agent(
         )
 
         if memory_context:
+
             agent_messages.insert(
                 0,
                 HumanMessage(
                     content=memory_context
                 ),
             )
+
+        # ----------------------------------------------------------
+        # Agent Runtime
+        # ----------------------------------------------------------
 
         result = await agent.ainvoke(
             {
@@ -161,35 +163,61 @@ def create_operations_agent(
             [],
         )
 
-        # 只检查当前 invocation 新增的消息。
+        # ----------------------------------------------------------
+        # 只检查本次 Agent Invocation 新消息
+        # ----------------------------------------------------------
+
         new_messages = result_messages[
             len(agent_messages):
         ]
 
-        failure = extract_tool_execution_error(
-            new_messages
+        failure = (
+            extract_tool_execution_error(
+                new_messages
+            )
         )
 
-        tool_results = collect_tool_results(
-            result_messages
+        tool_results = (
+            collect_tool_results(
+                result_messages
+            )
         )
+
+        # ----------------------------------------------------------
+        # Failure
+        # ----------------------------------------------------------
 
         if failure is not None:
+
             return {
                 "messages": result_messages,
-                "current_agent": "ticket_agent",
+                "current_agent": (
+                    "operations_agent"
+                ),
                 "task_status": "failed",
-                "error": failure["error"],
-                "last_failed_node": "ticket_agent",
+                "error": failure[
+                    "error"
+                ],
+                "last_failed_node": (
+                    "operations_agent"
+                ),
                 "last_failed_tool": (
-                    failure["last_failed_tool"]
+                    failure[
+                        "last_failed_tool"
+                    ]
                 ),
                 "tool_results": tool_results,
             }
 
+        # ----------------------------------------------------------
+        # Success
+        # ----------------------------------------------------------
+
         return {
             "messages": result_messages,
-            "current_agent": "ticket_agent",
+            "current_agent": (
+                "operations_agent"
+            ),
             "task_status": "completed",
             "tool_results": tool_results,
         }
@@ -203,7 +231,6 @@ def _build_memory_context(
     """
     构造长期记忆上下文。
 
-    Memory 只能提供历史背景。
     当前实时服务状态必须以
     get_service_health 的结果为准。
     """
