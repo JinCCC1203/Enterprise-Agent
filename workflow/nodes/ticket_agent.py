@@ -133,10 +133,8 @@ def create_ticket_agent(
             [],
         )
 
-        memory_context = (
-            _build_memory_context(
-                retrieved_memories
-            )
+        memory_context = _build_memory_context(
+            retrieved_memories
         )
 
         agent_messages = list(
@@ -167,8 +165,9 @@ def create_ticket_agent(
             )
 
         # ==========================================================
-        # IMPORTANT:
-        # LangGraph HITL interrupt 不能被 Specialist 捕获。
+        # HITL Interrupt
+        #
+        # 必须直接向 LangGraph 传播。
         # ==========================================================
 
         except GraphInterrupt:
@@ -191,10 +190,6 @@ def create_ticket_agent(
                     type(exc).__name__
                 )
 
-            # ------------------------------------------------------
-            # Tool Error Metadata
-            # ------------------------------------------------------
-
             failed_tool = getattr(
                 exc,
                 "tool_name",
@@ -202,7 +197,7 @@ def create_ticket_agent(
             )
 
             # ------------------------------------------------------
-            # 尝试从已有 State Message 中恢复 Tool Error
+            # 从已有 State Message 恢复 Tool Error
             # ------------------------------------------------------
 
             existing_messages = list(
@@ -245,10 +240,21 @@ def create_ticket_agent(
                     )
 
             # ------------------------------------------------------
-            # Specialist Failure
+            # 保留已有 Tool Results
             # ------------------------------------------------------
 
+            previous_tool_results = list(
+                state.get(
+                    "tool_results",
+                    [],
+                )
+            )
+
             return {
+                "messages": state.get(
+                    "messages",
+                    [],
+                ),
                 "current_agent": (
                     "ticket_agent"
                 ),
@@ -258,6 +264,7 @@ def create_ticket_agent(
                     "ticket_agent"
                 ),
                 "last_failed_tool": failed_tool,
+                "tool_results": previous_tool_results,
             }
 
         # ==========================================================
@@ -270,7 +277,7 @@ def create_ticket_agent(
         )
 
         # ----------------------------------------------------------
-        # 只检查当前 invocation 新消息
+        # 只检查本次 invocation 新增消息
         # ----------------------------------------------------------
 
         new_messages = result_messages[
@@ -283,10 +290,26 @@ def create_ticket_agent(
             )
         )
 
-        tool_results = (
+        # ----------------------------------------------------------
+        # 当前 invocation Tool Results
+        # ----------------------------------------------------------
+
+        current_tool_results = (
             collect_tool_results(
                 result_messages
             )
+        )
+
+        # ----------------------------------------------------------
+        # 合并历史 Tool Results
+        # ----------------------------------------------------------
+
+        tool_results = _merge_tool_results(
+            state.get(
+                "tool_results",
+                [],
+            ),
+            current_tool_results,
         )
 
         # ----------------------------------------------------------
@@ -331,6 +354,56 @@ def create_ticket_agent(
     return ticket_agent_node
 
 
+def _merge_tool_results(
+    previous: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    合并 Workflow 历史 Tool Results 与当前 invocation
+    产生的 Tool Results。
+
+    以 tool_call_id 去重。
+    """
+
+    merged: list[dict[str, Any]] = []
+
+    seen_ids: set[str] = set()
+
+    for result in [
+        *previous,
+        *current,
+    ]:
+
+        if not isinstance(
+            result,
+            dict,
+        ):
+            continue
+
+        tool_call_id = result.get(
+            "tool_call_id"
+        )
+
+        if isinstance(
+            tool_call_id,
+            str,
+        ) and tool_call_id:
+
+            if tool_call_id in seen_ids:
+
+                continue
+
+            seen_ids.add(
+                tool_call_id
+            )
+
+        merged.append(
+            result
+        )
+
+    return merged
+
+
 def _build_memory_context(
     memories: list[str],
 ) -> str:
@@ -366,3 +439,4 @@ def _build_memory_context(
         "tool. Do not treat long-term memory as authoritative "
         "for the current ticket state."
     )
+

@@ -47,6 +47,9 @@ def create_knowledge_agent(
 ):
     """
     创建 Knowledge Specialist Agent。
+
+    Scope:
+        rag_search
     """
 
     # ==============================================================
@@ -158,17 +161,9 @@ def create_knowledge_agent(
                 context=runtime.context,
             )
 
-        # ==========================================================
-        # HITL Interrupt
-        # ==========================================================
-
         except GraphInterrupt:
 
             raise
-
-        # ==========================================================
-        # Tool Retry Exhausted / Agent Failure
-        # ==========================================================
 
         except Exception as exc:
 
@@ -230,6 +225,10 @@ def create_knowledge_agent(
                     )
 
             return {
+                "messages": state.get(
+                    "messages",
+                    [],
+                ),
                 "current_agent": (
                     "knowledge_agent"
                 ),
@@ -239,6 +238,12 @@ def create_knowledge_agent(
                     "knowledge_agent"
                 ),
                 "last_failed_tool": failed_tool,
+                "tool_results": list(
+                    state.get(
+                        "tool_results",
+                        [],
+                    )
+                ),
             }
 
         # ==========================================================
@@ -260,15 +265,23 @@ def create_knowledge_agent(
             )
         )
 
-        tool_results = (
+        current_tool_results = (
             collect_tool_results(
                 result_messages
             )
         )
 
-        # ----------------------------------------------------------
+        tool_results = _merge_tool_results(
+            state.get(
+                "tool_results",
+                [],
+            ),
+            current_tool_results,
+        )
+
+        # ==========================================================
         # Failure
-        # ----------------------------------------------------------
+        # ==========================================================
 
         if failure is not None:
 
@@ -292,9 +305,9 @@ def create_knowledge_agent(
                 "tool_results": tool_results,
             }
 
-        # ----------------------------------------------------------
+        # ==========================================================
         # Success
-        # ----------------------------------------------------------
+        # ==========================================================
 
         return {
             "messages": result_messages,
@@ -306,6 +319,53 @@ def create_knowledge_agent(
         }
 
     return knowledge_agent_node
+
+
+def _merge_tool_results(
+    previous: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    合并历史与当前 Tool Results。
+    """
+
+    merged: list[dict[str, Any]] = []
+
+    seen_ids: set[str] = set()
+
+    for result in [
+        *previous,
+        *current,
+    ]:
+
+        if not isinstance(
+            result,
+            dict,
+        ):
+            continue
+
+        tool_call_id = result.get(
+            "tool_call_id"
+        )
+
+        if isinstance(
+            tool_call_id,
+            str,
+        ) and tool_call_id:
+
+            if tool_call_id in seen_ids:
+
+                continue
+
+            seen_ids.add(
+                tool_call_id
+            )
+
+        merged.append(
+            result
+        )
+
+    return merged
 
 
 def _build_memory_context(
@@ -333,3 +393,4 @@ def _build_memory_context(
         "information, always rely on rag_search results "
         "over historical memory."
     )
+

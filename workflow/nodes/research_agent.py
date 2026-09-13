@@ -161,17 +161,9 @@ def create_research_agent(
                 context=runtime.context,
             )
 
-        # ==========================================================
-        # HITL Interrupt
-        # ==========================================================
-
         except GraphInterrupt:
 
             raise
-
-        # ==========================================================
-        # Tool Retry Exhausted / Agent Failure
-        # ==========================================================
 
         except Exception as exc:
 
@@ -233,6 +225,10 @@ def create_research_agent(
                     )
 
             return {
+                "messages": state.get(
+                    "messages",
+                    [],
+                ),
                 "current_agent": (
                     "research_agent"
                 ),
@@ -242,6 +238,12 @@ def create_research_agent(
                     "research_agent"
                 ),
                 "last_failed_tool": failed_tool,
+                "tool_results": list(
+                    state.get(
+                        "tool_results",
+                        [],
+                    )
+                ),
             }
 
         # ==========================================================
@@ -263,15 +265,23 @@ def create_research_agent(
             )
         )
 
-        tool_results = (
+        current_tool_results = (
             collect_tool_results(
                 result_messages
             )
         )
 
-        # ----------------------------------------------------------
+        tool_results = _merge_tool_results(
+            state.get(
+                "tool_results",
+                [],
+            ),
+            current_tool_results,
+        )
+
+        # ==========================================================
         # Failure
-        # ----------------------------------------------------------
+        # ==========================================================
 
         if failure is not None:
 
@@ -295,9 +305,9 @@ def create_research_agent(
                 "tool_results": tool_results,
             }
 
-        # ----------------------------------------------------------
+        # ==========================================================
         # Success
-        # ----------------------------------------------------------
+        # ==========================================================
 
         return {
             "messages": result_messages,
@@ -309,6 +319,53 @@ def create_research_agent(
         }
 
     return research_agent_node
+
+
+def _merge_tool_results(
+    previous: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    合并历史与当前 Tool Results。
+    """
+
+    merged: list[dict[str, Any]] = []
+
+    seen_ids: set[str] = set()
+
+    for result in [
+        *previous,
+        *current,
+    ]:
+
+        if not isinstance(
+            result,
+            dict,
+        ):
+            continue
+
+        tool_call_id = result.get(
+            "tool_call_id"
+        )
+
+        if isinstance(
+            tool_call_id,
+            str,
+        ) and tool_call_id:
+
+            if tool_call_id in seen_ids:
+
+                continue
+
+            seen_ids.add(
+                tool_call_id
+            )
+
+        merged.append(
+            result
+        )
+
+    return merged
 
 
 def _build_memory_context(
@@ -342,3 +399,4 @@ def _build_memory_context(
         "always verify the information through the web_search "
         "tool before presenting it as a current fact."
     )
+

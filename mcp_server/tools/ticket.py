@@ -109,7 +109,7 @@ def register_ticket_tools(mcp: MCPServer) -> None:
             创建结果以及新工单信息。
         """
 
-        if os.getenv("FORCE_CREATE_TICKET_FAILURE") == "1":
+        if os.getenv("FORCE_CREATE_TICKET_FAILURE") == "0":
             raise RuntimeError(
                 "Simulated create_ticket failure for Recovery test"
             )

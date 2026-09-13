@@ -707,7 +707,7 @@ async def main() -> None:
     # ==========================================================
 
     config = get_config(
-        "recovery_test_003"
+        "recovery_test_005"
     )
 
     # ==========================================================
@@ -861,11 +861,7 @@ async def main() -> None:
                 "messages": [
                     HumanMessage(
                         content=(
-                            "请为 payment-service 创建一个 P1 Incident 工单。"
-                            "标题为“payment-service 高延迟告警”，"
-                            "描述为“当前 payment-service 出现严重延迟，"
-                            "需要立即排查并通知相关团队。”"
-                            "如果系统要求人工审批，请暂停并等待我的确认。"
+                            "搜索 LangGraph 官方文档中 checkpoint 的作用。"
                         )
                     )
                 ],
