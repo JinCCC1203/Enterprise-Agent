@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
+from langgraph.errors import GraphInterrupt
 from langgraph.runtime import Runtime
 
 from middlewares.dynamic_tools import (
@@ -151,17 +152,117 @@ def create_ticket_agent(
                 ),
             )
 
-        # ----------------------------------------------------------
+        # ==========================================================
         # Agent Runtime
-        # ----------------------------------------------------------
+        # ==========================================================
 
-        result = await agent.ainvoke(
-            {
-                "messages": agent_messages,
-            },
-            config=config,
-            context=runtime.context,
-        )
+        try:
+
+            result = await agent.ainvoke(
+                {
+                    "messages": agent_messages,
+                },
+                config=config,
+                context=runtime.context,
+            )
+
+        # ==========================================================
+        # IMPORTANT:
+        # LangGraph HITL interrupt 不能被 Specialist 捕获。
+        # ==========================================================
+
+        except GraphInterrupt:
+
+            raise
+
+        # ==========================================================
+        # Tool Retry Exhausted / Agent Failure
+        # ==========================================================
+
+        except Exception as exc:
+
+            error_message = str(
+                exc
+            ).strip()
+
+            if not error_message:
+
+                error_message = (
+                    type(exc).__name__
+                )
+
+            # ------------------------------------------------------
+            # Tool Error Metadata
+            # ------------------------------------------------------
+
+            failed_tool = getattr(
+                exc,
+                "tool_name",
+                None,
+            )
+
+            # ------------------------------------------------------
+            # 尝试从已有 State Message 中恢复 Tool Error
+            # ------------------------------------------------------
+
+            existing_messages = list(
+                state.get(
+                    "messages",
+                    [],
+                )
+            )
+
+            failure = (
+                extract_tool_execution_error(
+                    existing_messages
+                )
+            )
+
+            if failure is not None:
+
+                message_error = failure.get(
+                    "error"
+                )
+
+                if (
+                    isinstance(
+                        message_error,
+                        str,
+                    )
+                    and message_error.strip()
+                ):
+
+                    error_message = (
+                        message_error
+                    )
+
+                if not failed_tool:
+
+                    failed_tool = (
+                        failure.get(
+                            "last_failed_tool"
+                        )
+                    )
+
+            # ------------------------------------------------------
+            # Specialist Failure
+            # ------------------------------------------------------
+
+            return {
+                "current_agent": (
+                    "ticket_agent"
+                ),
+                "task_status": "failed",
+                "error": error_message,
+                "last_failed_node": (
+                    "ticket_agent"
+                ),
+                "last_failed_tool": failed_tool,
+            }
+
+        # ==========================================================
+        # Successful Agent Invocation
+        # ==========================================================
 
         result_messages = result.get(
             "messages",
@@ -247,6 +348,7 @@ def _build_memory_context(
     """
 
     if not memories:
+
         return ""
 
     memory_text = "\n".join(

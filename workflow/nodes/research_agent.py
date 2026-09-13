@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
+from langgraph.errors import GraphInterrupt
 from langgraph.runtime import Runtime
 
 from middlewares.dynamic_tools import (
@@ -146,26 +147,111 @@ def create_research_agent(
                 ),
             )
 
-        # ----------------------------------------------------------
+        # ==========================================================
         # Agent Runtime
-        # ----------------------------------------------------------
+        # ==========================================================
 
-        result = await agent.ainvoke(
-            {
-                "messages": agent_messages,
-            },
-            config=config,
-            context=runtime.context,
-        )
+        try:
+
+            result = await agent.ainvoke(
+                {
+                    "messages": agent_messages,
+                },
+                config=config,
+                context=runtime.context,
+            )
+
+        # ==========================================================
+        # HITL Interrupt
+        # ==========================================================
+
+        except GraphInterrupt:
+
+            raise
+
+        # ==========================================================
+        # Tool Retry Exhausted / Agent Failure
+        # ==========================================================
+
+        except Exception as exc:
+
+            error_message = str(
+                exc
+            ).strip()
+
+            if not error_message:
+
+                error_message = (
+                    type(exc).__name__
+                )
+
+            failed_tool = getattr(
+                exc,
+                "tool_name",
+                None,
+            )
+
+            existing_messages = list(
+                state.get(
+                    "messages",
+                    [],
+                )
+            )
+
+            failure = (
+                extract_tool_execution_error(
+                    existing_messages
+                )
+            )
+
+            if failure is not None:
+
+                extracted_error = (
+                    failure.get(
+                        "error"
+                    )
+                )
+
+                if (
+                    isinstance(
+                        extracted_error,
+                        str,
+                    )
+                    and extracted_error.strip()
+                ):
+
+                    error_message = (
+                        extracted_error
+                    )
+
+                if not failed_tool:
+
+                    failed_tool = (
+                        failure.get(
+                            "last_failed_tool"
+                        )
+                    )
+
+            return {
+                "current_agent": (
+                    "research_agent"
+                ),
+                "task_status": "failed",
+                "error": error_message,
+                "last_failed_node": (
+                    "research_agent"
+                ),
+                "last_failed_tool": failed_tool,
+            }
+
+        # ==========================================================
+        # Successful Agent Invocation
+        # ==========================================================
 
         result_messages = result.get(
             "messages",
             [],
         )
-
-        # ----------------------------------------------------------
-        # 只检查当前 invocation 新增消息
-        # ----------------------------------------------------------
 
         new_messages = result_messages[
             len(agent_messages):
@@ -239,6 +325,7 @@ def _build_memory_context(
     """
 
     if not memories:
+
         return ""
 
     memory_text = "\n".join(

@@ -652,9 +652,6 @@ async def _resume_tool_hitl(
                     "decisions": decisions,
                 },
                 update={
-                    "approval_status": (
-                        approval_status
-                    ),
                     "approval_events": [
                         approval_event
                     ],
@@ -710,7 +707,7 @@ async def main() -> None:
     # ==========================================================
 
     config = get_config(
-        "user_001"
+        "recovery_test_003"
     )
 
     # ==========================================================

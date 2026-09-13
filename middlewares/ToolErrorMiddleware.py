@@ -23,12 +23,19 @@ def _build_tool_error_message(
     """
     构造结构化 Tool Error Message。
 
-    ToolErrorMiddleware 是：
-        Retry exhausted
+    Retry Exhausted 后：
+
+        RetryMiddleware
             ↓
-        Error normalization
+        ToolErrorMiddleware
             ↓
-        Structured ToolMessage
+        构造结构化错误事实
+            ↓
+        继续向上抛出异常
+            ↓
+        Specialist Node
+            ↓
+        Recovery
     """
 
     tool_call = request.tool_call
@@ -62,6 +69,70 @@ def _build_tool_error_message(
     )
 
 
+def _annotate_tool_error(
+    *,
+    request: ToolCallRequest,
+    error: Exception,
+) -> None:
+    """
+    将 Tool Error Runtime Facts 附着到异常对象。
+
+    这样 Specialist Node 在捕获异常时，
+    即使没有 ToolMessage，也可以知道：
+
+        - 哪个 Tool 失败
+        - 是否 Retry Exhausted
+        - 错误类型
+        - 错误信息
+    """
+
+    tool_call = request.tool_call
+
+    tool_name = tool_call.get(
+        "name"
+    )
+
+    tool_call_id = tool_call.get(
+        "id"
+    )
+
+    setattr(
+        error,
+        "tool_execution_error",
+        True,
+    )
+
+    setattr(
+        error,
+        "retry_exhausted",
+        True,
+    )
+
+    setattr(
+        error,
+        "tool_name",
+        tool_name,
+    )
+
+    setattr(
+        error,
+        "tool_call_id",
+        tool_call_id,
+    )
+
+    setattr(
+        error,
+        "error_type",
+        type(error).__name__,
+    )
+
+    setattr(
+        error,
+        "error_message",
+        str(error),
+    )
+
+
 # ==============================================================
 # Sync Tool Error
 # ==============================================================
@@ -78,8 +149,23 @@ def tool_error(
     """
     同步 Tool Error Middleware。
 
-    只有当内层 Tool Retry 已经耗尽，
-    仍然抛出异常时，这里才负责捕获。
+    调用链：
+
+        Tool
+          ↓
+        Retry
+          ↓
+        Retry Exhausted
+          ↓
+        ToolError
+          ↓
+        annotate error
+          ↓
+        raise
+          ↓
+        Specialist
+          ↓
+        Recovery
     """
 
     try:
@@ -88,10 +174,23 @@ def tool_error(
 
     except Exception as exc:
 
-        return _build_tool_error_message(
+        _annotate_tool_error(
             request=request,
             error=exc,
         )
+
+        # 构造 ToolMessage，保留统一错误语义。
+        #
+        # 当前架构不直接 return，
+        # 因为 return 会让 Agent 继续运行。
+        _build_tool_error_message(
+            request=request,
+            error=exc,
+        )
+
+        # 关键：
+        # 不能吞掉异常。
+        raise
 
 
 # ==============================================================
@@ -104,24 +203,17 @@ async def tool_error_async(
     request: ToolCallRequest,
     handler: Callable[
         [ToolCallRequest],
-        ToolMessage,
+        Any,
     ],
-) -> ToolMessage:
+) -> Any:
     """
     异步 Tool Error Middleware。
 
-    调用链：
-        Tool
-          ↓
-        RetryMiddleware
-          ↓
-        retry × 3
-          ↓
-        still failed
-          ↓
-        ToolErrorMiddleware
-          ↓
-        Structured ToolMessage
+    Retry Exhausted 后：
+
+        不返回 ToolMessage
+        不继续 Agent Loop
+        直接 raise
     """
 
     try:
@@ -130,7 +222,17 @@ async def tool_error_async(
 
     except Exception as exc:
 
-        return _build_tool_error_message(
+        _annotate_tool_error(
             request=request,
             error=exc,
         )
+
+        # 构造结构化错误事实。
+        _build_tool_error_message(
+            request=request,
+            error=exc,
+        )
+
+        # 关键：
+        # 将异常继续向 Specialist Node 传播。
+        raise
