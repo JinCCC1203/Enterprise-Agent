@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import json
 import uuid
 from typing import Any
 
@@ -303,27 +304,117 @@ async def _resume_tool_hitl(
 
             for action in action_requests:
 
-                current_args = action.get(
-                    "args",
-                    {},
+                current_args = dict(
+
+                    action.get(
+
+                        "args",
+
+                        {},
+
+                    )
+
                 )
 
-                print(f"Current tool arguments: {_one_line(current_args)}")
+                print(
+
+                    f"Current tool arguments: "
+
+                    f"{_one_line(current_args)}"
+
+                )
+
+                while True:
+
+                    edited_input = input(
+
+                        "Enter edited arguments as JSON: "
+
+                    ).strip()
+
+                    try:
+
+                        edited_fields = json.loads(
+
+                            edited_input
+
+                        )
+
+                    except json.JSONDecodeError:
+
+                        print(
+
+                            "Invalid JSON. Example: "
+
+                            '{"title":"edited integration test","priority":"P1"}'
+
+                        )
+
+                        continue
+
+                    if not isinstance(
+
+                            edited_fields,
+
+                            dict,
+
+                    ):
+                        print(
+
+                            "Edited arguments must be a JSON object."
+
+                        )
+
+                        continue
+
+                    updated_args = dict(
+
+                        current_args
+
+                    )
+
+                    updated_args.update(
+
+                        edited_fields
+
+                    )
+
+                    break
+
+                print(
+
+                    f"Updated tool arguments: "
+
+                    f"{_one_line(updated_args)}"
+
+                )
 
                 decisions.append(
+
                     {
+
                         "type": "edit",
+
                         "edited_action": {
+
                             "name": action.get(
+
                                 "name"
+
                             ),
-                            "args": current_args,
+
+                            "args": updated_args,
+
                         },
+
                     }
+
                 )
 
             approval_status = (
+
                 "edited"
+
             )
 
         # ======================================================
@@ -409,7 +500,7 @@ async def main() -> None:
     # ==========================================================
 
     config = get_config(
-        "research-agent-test-007"
+        "research-agent-test-015"
     )
 
     # ==========================================================
@@ -550,7 +641,7 @@ async def main() -> None:
             # ==================================================
 
             query = (
-                "请检查 payment-service 当前健康状态。如果状态为 degraded，请创建一个 P1 Incident 工单，标题为“conditional routing test”。"
+                "Please check the current health of payment-service. If the service is degraded, create a P1 Incident ticket with the title --- original integration test."
             )
 
             print(f"Test Query: {query}")

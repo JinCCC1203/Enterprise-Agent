@@ -5,7 +5,10 @@ from contextlib import asynccontextmanager
 
 from mcp_adapter.mcp_to_langchain import convert_mcp_tools
 from mcp_client.client import get_mcp_tools, mcp_session
-from tools.rag_tool import rag_search
+from tools.rag_tool import (
+    RAG_SEARCH_DESCRIPTION,
+    rag_search,
+)
 from tools_manager.metadata import (
     ToolMetadata,
     ToolRiskLevel,
@@ -14,7 +17,16 @@ from tools_manager.metadata import (
 from tools_manager.registry import ToolRegistry
 
 
+# ==============================================================
+# MCP Tool Metadata
+# ==============================================================
+
 MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
+
+    # ==========================================================
+    # get_service_health
+    # ==========================================================
+
     "get_service_health": ToolMetadata(
         name="get_service_health",
         category="operations",
@@ -38,9 +50,14 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         source=ToolSource.MCP,
         risk_level=ToolRiskLevel.LOW,
         description=(
-            "Query the current health status of an enterprise service."
+            "Query the current health status of an "
+            "enterprise service."
         ),
     ),
+
+    # ==========================================================
+    # get_ticket
+    # ==========================================================
 
     "get_ticket": ToolMetadata(
         name="get_ticket",
@@ -64,9 +81,14 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         source=ToolSource.MCP,
         risk_level=ToolRiskLevel.LOW,
         description=(
-            "Get the current status and details of an enterprise ticket."
+            "Get the current status and details of an "
+            "enterprise ticket or incident."
         ),
     ),
+
+    # ==========================================================
+    # create_ticket
+    # ==========================================================
 
     "create_ticket": ToolMetadata(
         name="create_ticket",
@@ -89,9 +111,16 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         source=ToolSource.MCP,
         risk_level=ToolRiskLevel.MEDIUM,
         description=(
-            "Create a new enterprise incident or ticket."
+            "Create a new enterprise incident or ticket. "
+            "This is a write operation with an external side "
+            "effect and is subject to permission, risk, retry, "
+            "and Human-in-the-Loop governance."
         ),
     ),
+
+    # ==========================================================
+    # update_ticket
+    # ==========================================================
 
     "update_ticket": ToolMetadata(
         name="update_ticket",
@@ -115,9 +144,15 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         source=ToolSource.MCP,
         risk_level=ToolRiskLevel.MEDIUM,
         description=(
-            "Update the state or processing comment of an enterprise ticket."
+            "Update the state or processing comment of an "
+            "enterprise ticket or incident. The operation is "
+            "designed to be idempotent."
         ),
     ),
+
+    # ==========================================================
+    # send_notification
+    # ==========================================================
 
     "send_notification": ToolMetadata(
         name="send_notification",
@@ -140,9 +175,17 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         source=ToolSource.MCP,
         risk_level=ToolRiskLevel.HIGH,
         description=(
-            "Send a notification to an enterprise communication channel."
+            "Send a notification to an enterprise "
+            "communication channel. This is a high-risk "
+            "external side-effect operation and requires "
+            "appropriate risk control and Human-in-the-Loop "
+            "approval."
         ),
     ),
+
+    # ==========================================================
+    # web_search
+    # ==========================================================
 
     "web_search": ToolMetadata(
         name="web_search",
@@ -168,11 +211,17 @@ MCP_TOOL_METADATA: dict[str, ToolMetadata] = {
         source=ToolSource.MCP,
         risk_level=ToolRiskLevel.LOW,
         description=(
-            "Search publicly available information on the internet."
+            "Search publicly available information on the "
+            "internet, including public documentation, news, "
+            "and current external information."
         ),
     ),
 }
 
+
+# ==============================================================
+# MCP Metadata Resolver
+# ==============================================================
 
 def _metadata_for_mcp_tool(
     tool,
@@ -180,7 +229,7 @@ def _metadata_for_mcp_tool(
     """
     根据 MCP Tool 名称获取治理 Metadata。
 
-    对未知 Tool 采用保守策略：
+    对未知 MCP Tool 采用保守策略：
 
     - category = external
     - 仅允许 developer/admin
@@ -219,18 +268,22 @@ def _metadata_for_mcp_tool(
     )
 
 
+# ==============================================================
+# Create Tool Registry
+# ==============================================================
+
 @asynccontextmanager
 async def create_tool_registry(
 ) -> AsyncIterator[ToolRegistry]:
     """
     创建并维护 Agent Runtime 的统一 ToolRegistry。
 
-    Registry 中统一管理：
+    Registry 统一管理：
 
-    1. Local Tool
-    2. MCP Tool
+        1. Local Tools
+        2. MCP Tools
 
-    MCP Tool 在进入 Registry 前经过：
+    MCP Tool 进入 Registry 前经过：
 
         MCP Server
             ↓
@@ -242,14 +295,16 @@ async def create_tool_registry(
             ↓
         LangChain StructuredTool
             ↓
-        ToolRegistry + ToolMetadata
+        ToolRegistry
+            ↓
+        ToolMetadata
     """
 
     registry = ToolRegistry()
 
-    # ======================================================================
+    # ==========================================================
     # 1. Local RAG Tool
-    # ======================================================================
+    # ==========================================================
 
     registry.register(
         rag_search,
@@ -268,37 +323,45 @@ async def create_tool_registry(
                     "rag",
                     "search",
                     "knowledge",
+                    "enterprise",
+                    "internal",
                     "local",
                 }
             ),
             source=ToolSource.LOCAL,
             risk_level=ToolRiskLevel.LOW,
             description=(
-                "Search the enterprise knowledge base."
+                RAG_SEARCH_DESCRIPTION
             ),
         ),
     )
 
-    # ======================================================================
+    # ==========================================================
     # 2. MCP Session
-    # ======================================================================
+    # ==========================================================
 
     async with mcp_session() as session:
 
-        # 获取 MCP Server 暴露的原始 Tools
+        # ------------------------------------------------------
+        # 获取 MCP Server 原始 Tools
+        # ------------------------------------------------------
+
         raw_mcp_tools = await get_mcp_tools(
             session
         )
 
-        # 转换为 LangChain StructuredTool
+        # ------------------------------------------------------
+        # MCP → LangChain Tool
+        # ------------------------------------------------------
+
         mcp_tools = convert_mcp_tools(
             session,
             raw_mcp_tools,
         )
 
-        # ==================================================================
-        # 3. 注册 MCP Tools
-        # ==================================================================
+        # ======================================================
+        # 3. Register MCP Tools
+        # ======================================================
 
         for tool in mcp_tools:
 
@@ -311,8 +374,8 @@ async def create_tool_registry(
                 metadata,
             )
 
-        # ==================================================================
+        # ======================================================
         # 4. Yield Registry
-        # ==================================================================
+        # ======================================================
 
         yield registry
